@@ -1,0 +1,2 @@
+flask>=2.0.0
+pywin32>=300  # For potential future Windows API features
