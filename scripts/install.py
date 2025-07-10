@@ -48,12 +48,14 @@ def create_task_with_power_settings():
     
     python_path = sys.executable
     task_name = "KidPCMonitor"
+    current_user = os.getenv('USERNAME')
     
     # Show what we're about to do
     print(f"\n📋 Task Configuration:")
     print(f"   Script: {script_path}")
     print(f"   Python: {python_path}")
     print(f"   Task Name: {task_name}")
+    print(f"   User Account: {current_user}")
     
     confirm = input("\nProceed with these settings? (y/n): ").lower()
     if confirm != 'y':
@@ -65,11 +67,14 @@ def create_task_with_power_settings():
     # Create the action
     $action = New-ScheduledTaskAction -Execute "{python_path}" -Argument "{script_path}" -WorkingDirectory "{os.path.dirname(script_path)}"
     
-    # Create the trigger (at startup)
-    $trigger = New-ScheduledTaskTrigger -AtStartup
+    # Create multiple triggers
+    $triggers = @(
+        (New-ScheduledTaskTrigger -AtStartup),
+        (New-ScheduledTaskTrigger -AtLogon)
+    )
     
-    # Create principal (run with highest privileges)
-    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    # Create principal (run with current user)
+    $principal = New-ScheduledTaskPrincipal -UserId "{current_user}" -LogonType InteractiveToken -RunLevel Highest
     
     # Create settings with power options
     $settings = New-ScheduledTaskSettingsSet `
@@ -85,16 +90,13 @@ def create_task_with_power_settings():
     Register-ScheduledTask `
         -TaskName "{task_name}" `
         -Action $action `
-        -Trigger $trigger `
+        -Trigger $triggers `
         -Principal $principal `
         -Settings $settings `
         -Force
     
-    # Verify power settings
-    $task = Get-ScheduledTask -TaskName "{task_name}"
-    Write-Host "Task created successfully!"
-    Write-Host "AllowStartIfOnBatteries:" $task.Settings.DisallowStartIfOnBatteries
-    Write-Host "DontStopIfGoingOnBatteries:" $task.Settings.StopIfGoingOnBatteries
+    Write-Host "Task created successfully under user {current_user}!"
+    Write-Host "Triggers: At Startup + At Logon"
     '''
     
     try:
@@ -107,11 +109,10 @@ def create_task_with_power_settings():
         
         if result.returncode == 0:
             print("\n✅ Task created with battery power settings!")
-            print("   - Runs when you log in")
+            print(f"   - Runs when system starts AND when {current_user} logs in")
             print("   - Will start even on battery power")
             print("   - Won't stop if switching to battery")
             print("   - Will restart if it fails")
-            print("\n📝 Note: The control will start when the current user logs in.")
             return True
         else:
             print(f"\n❌ Error creating task: {result.stderr}")
