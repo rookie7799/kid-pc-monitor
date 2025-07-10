@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import datetime
 import ctypes
@@ -10,8 +11,22 @@ from datetime import datetime, time as dtime
 import subprocess
 from ctypes import wintypes
 
+import logging
+from pathlib import Path
+
+# Set up logging
+log_file = 'pc_control.log'
+os.unlink(log_file) #remove previous log
+
+logging.basicConfig(
+    filename=str(log_file),
+    level=logging.INFO,
+    format='[%(asctime)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
 class PCTimeControl:
-    def init(self):
+    def __init__(self):
         self.lock_times = []
         self.usage_limit = None
         self.start_time = datetime.now()
@@ -160,94 +175,249 @@ class PCTimeControl:
 
 # Simple Remote Control Server
 class RemoteControlServer:
-    def init(self, port=9999):
+    def __init__(self, port=9999, timeout=60):
+        """
+        Initialize the remote control server.
+        
+        Args:
+            port (int): Port number to listen on (default: 9999)
+            timeout (int): Socket timeout in seconds (default: 60)
+        """
         self.port = port
+        self.timeout = timeout
         self.pc_control = None
+        self.running = False
+        self.server_socket = None
+        self.clients = {}
+        self.client_id_counter = 0
+        self.logger = logging.getLogger('RemoteControlServer')
 
     def start_server(self, pc_control):
-        """Start listening for remote commands"""
+        """Start the remote control server."""
         self.pc_control = pc_control
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_socket.bind(('0.0.0.0', self.port))
-        server_socket.listen(1)
+        self.running = True
+        
+        try:
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.settimeout(5)  # Allow periodic checks for self.running
+            self.server_socket.bind(('0.0.0.0', self.port))
+            self.server_socket.listen(5)
+            
+            self.logger.info(f"Server started on port {self.port}")
+            
+            while self.running:
+                try:
+                    client_socket, client_address = self.server_socket.accept()
+                    client_socket.settimeout(self.timeout)
+                    
+                    client_id = self.client_id_counter
+                    self.client_id_counter += 1
+                    
+                    self.logger.info(f"New connection from {client_address} (ID: {client_id})")
+                    
+                    # Start a new thread for each client
+                    client_thread = threading.Thread(
+                        target=self.handle_client,
+                        args=(client_socket, client_address, client_id),
+                        daemon=True
+                    )
+                    self.clients[client_id] = {
+                        'thread': client_thread,
+                        'socket': client_socket,
+                        'address': client_address
+                    }
+                    client_thread.start()
+                    
+                except socket.timeout:
+                    continue  # Normal timeout for checking self.running
+                except Exception as e:
+                    self.logger.error(f"Accept error: {e}")
+                    break
+                
+        except Exception as e:
+            self.logger.error(f"Server error: {e}")
+        finally:
+            self.stop_server()
+            self.logger.info("Server stopped")
 
-        print(f"Remote control server listening on port {self.port}")
+    def handle_client(self, client_socket, client_address, client_id):
+        """Handle communication with a connected client."""
+        try:
+            while self.running:
+                try:
+                    data = client_socket.recv(1024).decode().strip()
+                    if not data:
+                        break  # Client disconnected
+                        
+                    self.logger.info(f"Received from {client_address} (ID: {client_id}): {data}")
+                    response = self.process_command(data)
+                    
+                    if response is not None:
+                        client_socket.sendall(response.encode())
+                        
+                except socket.timeout:
+                    # Send keepalive
+                    client_socket.sendall(b"ALIVE")
+                    continue
+                except Exception as e:
+                    self.logger.error(f"Client {client_id} error: {e}")
+                    break
+                    
+        finally:
+            client_socket.close()
+            if client_id in self.clients:
+                del self.clients[client_id]
+            self.logger.info(f"Client {client_address} (ID: {client_id}) disconnected")
 
-        while True:
-            client, addr = server_socket.accept()
-            data = client.recv(1024).decode()
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Received from {addr[0]}: {data}")
-
-            if data == "LOCK":
+    def process_command(self, command):
+        """Process incoming commands and return responses."""
+        try:
+            if command == "LOCK":
                 self.pc_control.lock_pc()
-                client.send(b"PC Locked")
-            elif data == "SHUTDOWN":
+                return "PC Locked"
+                
+            elif command == "SHUTDOWN":
                 self.pc_control.shutdown_pc()
-                client.send(b"PC Shutting down")
-            elif data == "GET_NAME":
-                # Send back the computer name
+                return "PC Shutting down"
+                
+            elif command == "GET_NAME":
                 import platform
-                client.send(platform.node().encode())
-            elif data == "GET_STATUS":
-                # always use your desktop‐switch check
+                return platform.node()
+                
+            elif command == "GET_STATUS":
                 actual_locked = self.pc_control.check_if_locked()
-
-                # update our state and log
                 if actual_locked != self.pc_control.is_locked:
                     self.pc_control.is_locked = actual_locked
-                    print(f"[{datetime.now():%H:%M:%S}] Status changed to: {'LOCKED' if actual_locked else 'UNLOCKED'}")
-
-                status = "LOCKED" if actual_locked else "UNLOCKED"
-                print(f"[{datetime.now():%H:%M:%S}] Sending status: {status}")
-                client.send(status.encode())
-            elif data.startswith("MESSAGE:"):
-                msg = data.split(":", 1)[1]
+                    self.logger.info(f"Status changed to: {'LOCKED' if actual_locked else 'UNLOCKED'}")
+                return "LOCKED" if actual_locked else "UNLOCKED"
+                
+            elif command.startswith("MESSAGE:"):
+                msg = command.split(":", 1)[1]
                 self.pc_control.show_message(msg)
-                client.send(b"Message sent")
-            elif data.startswith("SET_LIMIT:"):
+                return "Message sent"
+                
+            elif command.startswith("SET_LIMIT:"):
                 try:
-                    minutes = int(data.split(":", 1)[1])
+                    minutes = int(command.split(":", 1)[1])
                     self.pc_control.set_usage_limit(minutes)
-                    client.send(f"Usage limit set to {minutes} minutes".encode())
+                    return f"Usage limit set to {minutes} minutes"
                 except ValueError:
-                    client.send(b"Invalid limit value")
-            elif data.startswith("ADD_LOCK_TIME:"):
+                    return "Invalid limit value"
+                    
+            elif command.startswith("ADD_LOCK_TIME:"):
                 try:
-                    time_str = data.split(":", 1)[1]
+                    time_str = command.split(":", 1)[1]
                     hour, minute = map(int, time_str.split(":"))
                     self.pc_control.add_scheduled_lock(hour, minute)
-                    client.send(f"Lock time added: {hour:02d}:{minute:02d}".encode())
+                    return f"Lock time added: {hour:02d}:{minute:02d}"
                 except ValueError:
-                    client.send(b"Invalid value")
-            elif data.startswith("EXTEND_TIME:"):
+                    return "Invalid time format (use HH:MM)"
+                    
+            elif command.startswith("EXTEND_TIME:"):
                 try:
-                    minutes = int(data.split(":", 1)[1])
-                    # Add extra time to current limit
+                    minutes = int(command.split(":", 1)[1])
                     if self.pc_control.usage_limit:
                         self.pc_control.usage_limit += minutes
-                        client.send(f"Extended time by {minutes} minutes".encode())
-                    else:
-                        client.send(b"No time limit set to extend")
+                        return f"Extended time by {minutes} minutes"
+                    return "No time limit set to extend"
                 except ValueError:
-                    client.send(b"Invalid time value")
+                    return "Invalid time value"
+                    
+            elif command == "HELP":
+                return (
+                    "Available commands:\n"
+                    "LOCK - Lock the PC\n"
+                    "SHUTDOWN - Shutdown the PC\n"
+                    "GET_NAME - Get PC name\n"
+                    "GET_STATUS - Check if PC is locked\n"
+                    "MESSAGE:<text> - Show popup message\n"
+                    "SET_LIMIT:<minutes> - Set usage limit\n"
+                    "ADD_LOCK_TIME:HH:MM - Add scheduled lock\n"
+                    "EXTEND_TIME:<minutes> - Extend usage time"
+                )
+                
+            else:
+                return "Unknown command (try HELP)"
+                
+        except Exception as e:
+            self.logger.error(f"Command processing error: {e}")
+            return f"Error processing command: {e}"
 
-            client.close()
+    def stop_server(self):
+        """Stop the server and clean up resources."""
+        self.running = False
+        
+        # Close all client connections
+        for client_id, client_info in list(self.clients.items()):
+            try:
+                client_info['socket'].close()
+            except:
+                pass
+            del self.clients[client_id]
+        
+        # Close server socket
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except:
+                pass
+            self.server_socket = None
+
+    def __del__(self):
+        """Destructor to ensure proper cleanup."""
+        self.stop_server()
 
 # Main
-if __name__ == "main":
+if __name__ == "__main__":
     # Create control instance
     control = PCTimeControl()
-
-    # Set up initial time restrictions (optional)
-    # control.add_scheduled_lock(21, 0)  # Lock at 9 PM
-    # control.add_scheduled_lock(22, 0)  # Lock at 10 PM
-    # control.set_usage_limit(120)  # 2 hour limit
-
-    # Start remote control server in separate thread
+    
+    # Add network connectivity check
+    def check_port_availability(port):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('0.0.0.0', port))
+            return True
+        except socket.error:
+            return False
+    
+    if not check_port_availability(9999):
+        control.show_message(
+            f"Port 9999 is already in use or blocked!\n"
+            f"Check your firewall or other running applications.",
+            "Network Error"
+        )
+        sys.exit(1)
+    
+    # Start remote control server
     remote = RemoteControlServer()
     server_thread = threading.Thread(target=remote.start_server, args=(control,))
     server_thread.daemon = True
     server_thread.start()
-
-    # Run the monitor
-    control.run_monitor()
+    
+    # Verify server started
+    time.sleep(1)  # Give server time to start
+    if not remote.running:
+        control.show_message(
+            "Failed to start network server!\n"
+            "Check firewall settings and try again.",
+            "Server Error"
+        )
+        sys.exit(1)
+    
+    print("Server is running. Press Ctrl+C to stop.")
+    
+    try:
+        # Keep main thread alive while server runs
+        while remote.running:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down server...")
+        remote.stop_server()
+        server_thread.join(2)  # Wait up to 2 seconds for thread to finish
+        print("Server stopped.")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        sys.exit(0)
