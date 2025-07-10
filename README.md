@@ -19,8 +19,6 @@ DIY parental control system for parents who code. If you know what 'pip install'
 
 ![Web Interface](screenshots/screenshot_1.png)
 
-*Control multiple PCs from your phone*
-
 ## 🚀 Quick Start
 
 ## ⚠️ Technical Skills Required
@@ -65,7 +63,7 @@ python scripts/install.py
 cd src
 python web_panel.py
 
-# Open in browser
+# Open in your fav browser (PC or Phone)
 http://YOUR-PC-IP:5000
 ```
 
