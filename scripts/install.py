@@ -46,14 +46,14 @@ def create_task_with_power_settings():
     if not script_path:
         return False
     
-    python_path = sys.executable
+    pythonw_path = sys.executable.replace('python.exe', 'pythonw.exe')
     task_name = "KidPCMonitor"
     current_user = os.getenv('USERNAME')
     
     # Show what we're about to do
     print(f"\n📋 Task Configuration:")
     print(f"   Script: {script_path}")
-    print(f"   Python: {python_path}")
+    print(f"   Python: {pythonw_path}")
     print(f"   Task Name: {task_name}")
     print(f"   User Account: {current_user}")
     
@@ -64,39 +64,52 @@ def create_task_with_power_settings():
     
     # PowerShell script to create task with specific power settings
     ps_script = f'''
-    # Create the action
-    $action = New-ScheduledTaskAction -Execute "{python_path}" -Argument "{script_path}" -WorkingDirectory "{os.path.dirname(script_path)}"
-    
-    # Create multiple triggers
-    $triggers = @(
-        (New-ScheduledTaskTrigger -AtStartup),
-        (New-ScheduledTaskTrigger -AtLogon)
-    )
-    
-    # Create principal (run with current user)
-    $principal = New-ScheduledTaskPrincipal -UserId "{current_user}" -LogonType InteractiveToken -RunLevel Highest
-    
-    # Create settings with power options
-    $settings = New-ScheduledTaskSettingsSet `
-        -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries `
-        -StartWhenAvailable `
-        -DontStopOnIdleEnd `
-        -RestartCount 3 `
-        -RestartInterval (New-TimeSpan -Minutes 1) `
-        -ExecutionTimeLimit (New-TimeSpan -Hours 0)
-    
-    # Register the task
-    Register-ScheduledTask `
-        -TaskName "{task_name}" `
-        -Action $action `
-        -Trigger $triggers `
-        -Principal $principal `
-        -Settings $settings `
-        -Force
-    
-    Write-Host "Task created successfully under user {current_user}!"
-    Write-Host "Triggers: At Startup + At Logon"
+    $ErrorActionPreference = 'Stop'
+    try {{
+        # Create the action
+        $action = New-ScheduledTaskAction -Execute "{pythonw_path}" -Argument "{script_path}" -WorkingDirectory "{os.path.dirname(script_path)}"
+        
+        # Create multiple triggers
+        $triggers = @(
+            (New-ScheduledTaskTrigger -AtStartup),
+            (New-ScheduledTaskTrigger -AtLogon)
+        )
+        
+        # Create principal (run with current user)
+        $principal = New-ScheduledTaskPrincipal -UserId "{current_user}" -LogonType Interactive -RunLevel Highest
+        
+        # Create settings with power options
+        $settings = New-ScheduledTaskSettingsSet `
+            -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries `
+            -StartWhenAvailable `
+            -DontStopOnIdleEnd `
+            -RestartCount 3 `
+            -RestartInterval (New-TimeSpan -Minutes 1) `
+            -ExecutionTimeLimit (New-TimeSpan -Hours 0)
+        
+        # Register the task
+        Register-ScheduledTask `
+            -TaskName "{task_name}" `
+            -Action $action `
+            -Trigger $triggers `
+            -Principal $principal `
+            -Settings $settings `
+            -Force
+        
+        # Verify task was actually created
+        $task = Get-ScheduledTask -TaskName "{task_name}" -ErrorAction Stop
+        Write-Host "SUCCESS: Task verified in Task Scheduler"
+        Write-Host "Task Path: $($task.TaskPath)"
+        Write-Host "Triggers: $($task.Triggers)"
+        Write-Host "Principal: $($task.Principal)"
+        exit 0
+    }}
+    catch {{
+        Write-Host "ERROR: $_"
+        Write-Host "Detailed error: $($_.Exception.Message)"
+        exit 1
+    }}
     '''
     
     try:
@@ -107,21 +120,38 @@ def create_task_with_power_settings():
             text=True
         )
         
+        # Debug output
+        print("\n=== PowerShell Output ===")
+        print(result.stdout)
+        if result.stderr:
+            print("=== Errors ===")
+            print(result.stderr)
+        
         if result.returncode == 0:
-            print("\n✅ Task created with battery power settings!")
-            print(f"   - Runs when system starts AND when {current_user} logs in")
-            print("   - Will start even on battery power")
-            print("   - Won't stop if switching to battery")
-            print("   - Will restart if it fails")
-            return True
+            # Additional verification
+            verify_cmd = f'schtasks /query /tn "{task_name}"'
+            verify_result = subprocess.run(verify_cmd, shell=True, capture_output=True, text=True)
+            
+            if verify_result.returncode == 0:
+                print("\n✅ Task successfully created and verified!")
+                print(f"   - Triggers: At Startup + At Logon")
+                print(f"   - Running as: {current_user}")
+                print("\nYou can verify in Task Scheduler (taskschd.msc)")
+                return True
+            else:
+                print("\n❌ Task creation failed verification")
+                print("Try running this script as Administrator again")
+                return False
         else:
-            print(f"\n❌ Error creating task: {result.stderr}")
+            print("\n❌ Error creating task")
+            if "Access is denied" in result.stderr:
+                print("Please ensure you're running as Administrator")
             return False
             
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\n❌ Unexpected error: {e}")
         return False
-
+    
 def create_task_simple_schtasks():
     """Alternative using schtasks with XML template"""
     
@@ -139,7 +169,7 @@ def create_task_simple_schtasks():
     xml_content = f'''<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>Kids PC Time Control - Manages computer usage time</Description>
+    <Description>Kid PC Monitor - Manages computer usage time</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -254,7 +284,7 @@ def remove_task():
         print("ℹ️  Task not found or already removed.")
     
 if __name__ == "__main__":
-    print("Kids PC Time Control - Task Scheduler Setup")
+    print("Kid PC Monitor - Task Scheduler Setup")
     print("=" * 45)
     
     if not check_admin():
