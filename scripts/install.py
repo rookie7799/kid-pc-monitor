@@ -47,7 +47,7 @@ def create_task_with_power_settings():
         return False
     
     python_path = sys.executable
-    task_name = "KidsPCTimeControl"
+    task_name = "KidPCMonitor"
     
     # Show what we're about to do
     print(f"\n📋 Task Configuration:")
@@ -107,9 +107,11 @@ def create_task_with_power_settings():
         
         if result.returncode == 0:
             print("\n✅ Task created with battery power settings!")
+            print("   - Runs when you log in")
             print("   - Will start even on battery power")
             print("   - Won't stop if switching to battery")
             print("   - Will restart if it fails")
+            print("\n📝 Note: The control will start when the current user logs in.")
             return True
         else:
             print(f"\n❌ Error creating task: {result.stderr}")
@@ -128,7 +130,7 @@ def create_task_simple_schtasks():
         return False
     
     python_path = sys.executable
-    task_name = "KidsPCTimeControl"
+    task_name = "KidPCMonitor"
     
     print(f"\n📋 Creating task with XML method...")
     
@@ -139,13 +141,13 @@ def create_task_simple_schtasks():
     <Description>Kids PC Time Control - Manages computer usage time</Description>
   </RegistrationInfo>
   <Triggers>
-    <BootTrigger>
+    <LogonTrigger>
       <Enabled>true</Enabled>
-    </BootTrigger>
+    </LogonTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
-      <UserId>S-1-5-18</UserId>
+      <LogonType>InteractiveToken</LogonType>
       <RunLevel>HighestAvailable</RunLevel>
     </Principal>
   </Principals>
@@ -235,7 +237,7 @@ def check_admin():
 
 def remove_task():
     """Remove existing task"""
-    task_name = "KidsPCTimeControl"
+    task_name = "KidPCMonitor"
     print(f"\n🗑️  Removing task '{task_name}'...")
     
     result = subprocess.run(
