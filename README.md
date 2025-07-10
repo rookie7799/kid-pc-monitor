@@ -14,7 +14,6 @@ DIY parental control system for parents who code. If you know what 'pip install'
 - **⏱️ Daily usage limits** - Set maximum screen time
 - **💬 Send messages** - Display warnings or reminders
 - **🏠 Auto-discovery** - Finds all PCs on your network
-- **👨‍👩‍👧‍👦 Family-friendly** - No tech knowledge required
 
 ## 📸 Screenshots
 
@@ -29,8 +28,8 @@ This is NOT a one-click solution. You'll need to:
 - Install Python
 - Use command prompt
 - Understand IP addresses  
-- Configure Windows Firewall
-- Set up scheduled tasks
+- Configure Windows Firewall (technically you would simply allow the process to run - once)
+- Set up scheduled task
 
 If these terms scare you, consider commercial alternatives like:
 - Qustodio
