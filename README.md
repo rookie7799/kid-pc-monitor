@@ -18,6 +18,7 @@ DIY parental control system for parents who code. If you know what 'pip install'
 ## 📸 Screenshots
 
 ![Web Interface](screenshots/screenshot_1.png)
+
 *Control multiple PCs from your phone*
 
 ## 🚀 Quick Start
@@ -55,6 +56,8 @@ pip install -r requirements.txt
 # Run the control script (as administrator)
 python scripts/install.py
 ```
+* side note - if your code is "good" with computers, I would recommend copying pc_monitor.py
+ some place where it would be hard to find ;)
 
 2. **On your phone/computer:**
 ```bash
