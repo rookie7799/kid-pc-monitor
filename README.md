@@ -17,7 +17,7 @@ DIY parental control system for parents who code. If you know what 'pip install'
 
 ## 📸 Screenshots
 
-![Web Interface](screenshots/web-interface.png)
+![Web Interface](screenshots/screenshot_1.png)
 *Control multiple PCs from your phone*
 
 ## 🚀 Quick Start
