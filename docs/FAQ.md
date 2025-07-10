@@ -61,13 +61,6 @@ The PC returns to normal (no restrictions). You can:
 ### How does lock detection work?
 We check if LogonUI.exe (Windows lock screen) is running. This is very reliable.
 
-### Can I password protect the web interface?
-Yes! In config.py, set:
-```python
-REQUIRE_AUTH = True
-WEB_PASSWORD = "your-secure-password"
-```
-
 ### How can I contribute?
 - Report bugs via GitHub issues
 - Submit pull requests
