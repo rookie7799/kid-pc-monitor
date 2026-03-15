@@ -10,12 +10,19 @@ app = Flask(__name__)
 # Store discovered PCs
 discovered_pcs = {}
 last_scan_time = None
+show_only_custom_pc_names = True
 
 # Custom PC names (optional) - Add your kids' PC names here
 CUSTOM_PC_NAMES = {
     # Example: '192.168.1.105': 'Tommy\'s Laptop',
     # Example: '192.168.1.112': 'Sarah\'s Desktop',
+    '192.168.50.144': 'HammiePC',
+    '192.168.50.125': 'EddyPC',
+
 }
+
+print(f"show_only_custom_pc_names: {show_only_custom_pc_names}")
+print(f"custom_pc_names: {CUSTOM_PC_NAMES}")
 
 def get_local_ip():
     """Get the local IP address of this machine"""
@@ -113,6 +120,7 @@ def scan_for_servers(port=9999):
             s.settimeout(0.5)
             result = s.connect_ex((str(ip), port))
             s.close()
+            print(f"checking {ip}...")
             if result == 0:
                 # Try to get hostname from the PC directly
                 hostname = CUSTOM_PC_NAMES.get(str(ip), None)
@@ -135,6 +143,7 @@ def scan_for_servers(port=9999):
                         except:
                             hostname = f"PC at {ip}"
                 
+                print(f"adding {ip}: {hostname} to discovered_pcs")
                 discovered_pcs[str(ip)] = {
                     'hostname': hostname,
                     'status': 'online',
@@ -145,7 +154,19 @@ def scan_for_servers(port=9999):
             pass
     
     threads = []
-    for ip in network.hosts():
+
+    ips_to_check = []
+
+    if show_only_custom_pc_names:
+        print(f"starting discovery for ONLY custom PC IP's")
+        for ip in CUSTOM_PC_NAMES.keys():
+            ips_to_check.append(ip)
+    else:
+        print(f"starting discovery for all IP in the local network")
+        for ip in network.hosts():
+            ips_to_check.append(ip)
+
+    for ip in ips_to_check:
         t = threading.Thread(target=check_host, args=(ip,))
         t.start()
         threads.append(t)

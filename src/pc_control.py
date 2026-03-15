@@ -573,8 +573,7 @@ class RemoteControlServer:
         """Destructor to ensure proper cleanup."""
         self.stop_server()
 
-# Main
-if __name__ == "__main__":
+def run():
     # Create control instance
     control = PCTimeControl()
     
@@ -626,3 +625,7 @@ if __name__ == "__main__":
         print(f"Error: {e}")
     finally:
         sys.exit(0)
+
+# Main
+if __name__ == "__main__":
+    run()
