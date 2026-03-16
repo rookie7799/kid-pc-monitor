@@ -16,6 +16,99 @@ import json
 import logging
 from pathlib import Path
 
+# Windows API constants for session detection
+WTS_CURRENT_SERVER_HANDLE = 0
+WTSUserName = 5
+
+
+def get_active_console_session():
+    """
+    Get the session ID of the active console session (physical keyboard/monitor).
+    Returns the session ID or -1 if not found.
+    """
+    try:
+        kernel32 = ctypes.windll.kernel32
+        return kernel32.WTSGetActiveConsoleSessionId()
+    except Exception:
+        return -1
+
+
+def get_session_username(session_id):
+    """
+    Get the username for a given session ID using WTS API.
+    Returns the username or None if not found.
+    """
+    try:
+        wtsapi32 = ctypes.windll.wtsapi32
+
+        # WTSQuerySessionInformationW
+        WTSQuerySessionInformationW = wtsapi32.WTSQuerySessionInformationW
+        WTSQuerySessionInformationW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+                                                 ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(wintypes.DWORD)]
+        WTSQuerySessionInformationW.restype = wintypes.BOOL
+
+        # WTSFreeMemory
+        WTSFreeMemory = wtsapi32.WTSFreeMemory
+        WTSFreeMemory.argtypes = [wintypes.LPVOID]
+
+        buffer = wintypes.LPWSTR()
+        bytes_returned = wintypes.DWORD()
+
+        if WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session_id, WTSUserName,
+                                       ctypes.byref(buffer), ctypes.byref(bytes_returned)):
+            username = buffer.value
+            WTSFreeMemory(buffer)
+            return username if username else None
+        return None
+    except Exception:
+        return None
+
+
+def get_active_console_user():
+    """
+    Get the username of the user at the active console session.
+    Falls back to getpass.getuser() if detection fails.
+    """
+    session_id = get_active_console_session()
+    if session_id >= 0:
+        username = get_session_username(session_id)
+        if username:
+            return username
+    return getpass.getuser()
+
+
+def is_console_session_locked():
+    """
+    Check if the active console session is locked.
+    Uses a session-specific approach to detect lock status.
+    """
+    session_id = get_active_console_session()
+
+    if session_id < 0:
+        return False
+
+    try:
+        # Check if LogonUI.exe is running in the specific session
+        # tasklist with /FI "SESSION eq X" filters by session
+        out = subprocess.check_output(
+            f'tasklist /FI "IMAGENAME eq LogonUI.exe" /FI "SESSION eq {session_id}" /NH',
+            shell=True,
+            text=True,
+            stderr=subprocess.DEVNULL
+        )
+        return "LogonUI.exe" in out
+    except Exception:
+        # Fallback: use the old method
+        try:
+            out = subprocess.check_output(
+                'tasklist /FI "IMAGENAME eq LogonUI.exe" /NH',
+                shell=True,
+                text=True
+            )
+            return "LogonUI.exe" in out
+        except Exception:
+            return False
+
 # ============================================
 # CONFIGURATION
 # ============================================
@@ -141,21 +234,13 @@ class PCTimeControl:
 
     def check_if_locked(self):
         """
-        Returns True if LogonUI.exe is present (screen locked),
-        False otherwise.
+        Returns True if the active console session is locked, False otherwise.
+        This is session-aware and correctly handles multi-user scenarios.
         """
         try:
-            out = subprocess.check_output(
-                'tasklist /FI "IMAGENAME eq LogonUI.exe" /NH',
-                shell=True,
-                text=True
-            )
-            locked = "LogonUI.exe" in out
-            # print(f"[{datetime.now():%H:%M:%S}] LogonUI.exe running? {locked}")
-            return locked
+            return is_console_session_locked()
         except Exception as e:
-            print(f"[{datetime.now():%H:%M:%S}] Error checking LogonUI: {e}")
-            # fallback to whatever you had before (or assume unlocked)
+            print(f"[{datetime.now():%H:%M:%S}] Error checking lock status: {e}")
             return False
 
     def monitor_activity(self):
@@ -438,7 +523,8 @@ class RemoteControlServer:
                 return platform.node()
 
             elif command == "GET_CURRENT_USER":
-                return self.pc_control.current_user
+                # Return the user at the active console, not the process owner
+                return get_active_console_user()
 
             elif command == "GET_USAGE_LIMIT":
                 if self.pc_control.usage_limit:
