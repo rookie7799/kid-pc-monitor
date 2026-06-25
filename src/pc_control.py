@@ -611,6 +611,10 @@ if __name__ == "__main__":
     server_thread = threading.Thread(target=remote.start_server, args=(control,))
     server_thread.daemon = True
     server_thread.start()
+
+    # Start the enforcement monitor (checks time limits and locks PC when reached)
+    monitor_thread = threading.Thread(target=control.run_monitor, daemon=True)
+    monitor_thread.start()
     
     # Verify server started
     time.sleep(1)  # Give server time to start
