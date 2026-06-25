@@ -7,7 +7,7 @@ import socket
 import threading
 import tkinter as tk
 from tkinter import messagebox
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 import subprocess
 from ctypes import wintypes
 import getpass
@@ -69,6 +69,10 @@ class PCTimeControl:
         self.logger = logging.getLogger('PCTimeControl')
         self.warnings_sent = set()  # Track which warnings have been sent
         self.warning_intervals = [15, 5, 1]  # Warning times in minutes before lock
+        # Guards the limit/start_time/warnings_sent state that the server thread
+        # mutates while the monitor thread reads it (avoids locking against a
+        # half-applied limit change).
+        self.state_lock = threading.RLock()
 
         # Log which user we're running as
         if self.should_monitor_user():
@@ -251,13 +255,20 @@ class PCTimeControl:
         current_time = datetime.now()
         min_remaining = None
 
+        with self.state_lock:
+            lock_times = list(self.lock_times)
+            usage_limit = self.usage_limit
+            start_time = self.start_time
+
         # Check scheduled lock times
-        for lock_time in self.lock_times:
+        for lock_time in lock_times:
             lock_datetime = current_time.replace(hour=lock_time.hour, minute=lock_time.minute, second=0, microsecond=0)
 
-            # If lock time is earlier today, it's for tomorrow
+            # If lock time is earlier today, it's for tomorrow. Use timedelta
+            # so month/year roll over correctly (replace(day=day+1) raises
+            # ValueError on the last day of a month).
             if lock_datetime <= current_time:
-                lock_datetime = lock_datetime.replace(day=lock_datetime.day + 1)
+                lock_datetime = lock_datetime + timedelta(days=1)
 
             minutes_until_lock = (lock_datetime - current_time).total_seconds() / 60
 
@@ -265,12 +276,16 @@ class PCTimeControl:
                 min_remaining = minutes_until_lock
 
         # Check usage limit
-        if self.usage_limit:
-            usage_minutes = (current_time - self.start_time).total_seconds() / 60
-            minutes_until_limit = self.usage_limit - usage_minutes
+        if usage_limit:
+            usage_minutes = (current_time - start_time).total_seconds() / 60
+            minutes_until_limit = usage_limit - usage_minutes
 
             if min_remaining is None or minutes_until_limit < min_remaining:
                 min_remaining = minutes_until_limit
+
+        # Never report negative time; once the limit is reached it's simply 0.
+        if min_remaining is not None and min_remaining < 0:
+            min_remaining = 0
 
         return min_remaining
 
@@ -306,34 +321,52 @@ class PCTimeControl:
 
         current_time = datetime.now()
 
-        # Check scheduled lock times
-        for lock_time in self.lock_times:
+        with self.state_lock:
+            lock_times = list(self.lock_times)
+            usage_limit = self.usage_limit
+            start_time = self.start_time
+
+        # Check scheduled lock times. Match the whole target minute, not just
+        # its first second: the monitor loop does work + sleep(1) each pass and
+        # can step straight over second 0, missing the lock entirely.
+        for lock_time in lock_times:
             if (current_time.hour == lock_time.hour and
-                current_time.minute == lock_time.minute and
-                current_time.second < 1):
+                current_time.minute == lock_time.minute):
                 return True, "Scheduled lock time reached"
 
         # Check usage limit
-        if self.usage_limit:
-            usage_minutes = (current_time - self.start_time).total_seconds() / 60
-            if usage_minutes >= self.usage_limit:
-                return True, f"Usage limit of {self.usage_limit} minutes reached"
+        if usage_limit:
+            usage_minutes = (current_time - start_time).total_seconds() / 60
+            if usage_minutes >= usage_limit:
+                return True, f"Usage limit of {usage_limit} minutes reached"
 
         return False, ""
 
     def run_monitor(self):
-        """Main monitoring loop"""
+        """Main monitoring loop: enforces limits for the whole session.
+
+        Runs forever — it must NOT exit after the first lock, otherwise the kid
+        could unlock the screen and use the PC unrestricted for the rest of the
+        day. Locking only happens on the unlocked->over-limit transition so we
+        don't re-issue LockWorkStation every second while already at the lock
+        screen; monitor_activity clears is_locked when the screen is unlocked,
+        which re-arms enforcement if the limit is still exceeded.
+        """
         print("PC Time Control is running...")
         while True:
-            # Check and send warnings if approaching time limit
-            self.check_and_send_warnings()
+            try:
+                # Check and send warnings if approaching time limit
+                self.check_and_send_warnings()
 
-            # Check if time limit reached
-            should_lock, reason = self.check_time_limits()
-            if should_lock:
-                print(f"Locking PC: {reason}")
-                self.lock_pc()
-                break
+                # Check if time limit reached
+                should_lock, reason = self.check_time_limits()
+                if should_lock and not self.is_locked:
+                    print(f"Locking PC: {reason}")
+                    self.lock_pc()
+            except Exception as e:
+                # Never let a transient error kill the enforcement loop.
+                self.logger.error(f"Error in monitor loop: {e}")
+                print(f"[{datetime.now():%H:%M:%S}] Monitor loop error: {e}")
             time.sleep(1)
 
 # Simple Remote Control Server
@@ -483,9 +516,12 @@ class RemoteControlServer:
             elif command.startswith("SET_LIMIT:"):
                 try:
                     minutes = int(command.split(":", 1)[1])
-                    self.pc_control.set_usage_limit(minutes)
-                    self.pc_control.start_time = datetime.now()  # Reset start time when setting new limit
-                    self.pc_control.warnings_sent.clear()  # Clear warnings for new limit
+                    # Apply the three related fields atomically so the monitor
+                    # thread never sees the new limit against the old start_time.
+                    with self.pc_control.state_lock:
+                        self.pc_control.set_usage_limit(minutes)
+                        self.pc_control.start_time = datetime.now()  # Reset start time when setting new limit
+                        self.pc_control.warnings_sent.clear()  # Clear warnings for new limit
                     self.pc_control.save_state()  # Save state after setting limit
                     return f"Usage limit set to {minutes} minutes"
                 except ValueError:
@@ -504,31 +540,39 @@ class RemoteControlServer:
             elif command.startswith("EXTEND_TIME:"):
                 try:
                     minutes = int(command.split(":", 1)[1])
-                    if self.pc_control.usage_limit:
-                        self.pc_control.usage_limit += minutes
-                        self.pc_control.save_state()  # Save state after extending time
-                        return f"Extended time by {minutes} minutes"
-                    return "No time limit set to extend"
+                    with self.pc_control.state_lock:
+                        if self.pc_control.usage_limit:
+                            self.pc_control.usage_limit += minutes
+                            # Re-arm warnings so the new countdown warns again.
+                            self.pc_control.warnings_sent.clear()
+                        else:
+                            return "No time limit set to extend"
+                    self.pc_control.save_state()  # Save state after extending time
+                    return f"Extended time by {minutes} minutes"
                 except ValueError:
                     return "Invalid time value"
 
             elif command == "CLEAR_USAGE_LIMIT":
-                self.pc_control.usage_limit = None
+                with self.pc_control.state_lock:
+                    self.pc_control.usage_limit = None
+                    self.pc_control.warnings_sent.clear()
                 self.pc_control.save_state()
                 self.logger.info("Usage limit cleared")
                 return "Usage limit cleared"
 
             elif command == "CLEAR_LOCK_TIMES":
-                self.pc_control.lock_times = []
-                self.pc_control.warnings_sent.clear()  # Clear warnings too
+                with self.pc_control.state_lock:
+                    self.pc_control.lock_times = []
+                    self.pc_control.warnings_sent.clear()  # Clear warnings too
                 self.pc_control.save_state()
                 self.logger.info("All scheduled lock times cleared")
                 return "All scheduled lock times cleared"
 
             elif command == "CLEAR_ALL":
-                self.pc_control.usage_limit = None
-                self.pc_control.lock_times = []
-                self.pc_control.warnings_sent.clear()
+                with self.pc_control.state_lock:
+                    self.pc_control.usage_limit = None
+                    self.pc_control.lock_times = []
+                    self.pc_control.warnings_sent.clear()
                 self.pc_control.save_state()
                 self.logger.info("All limits and locks cleared")
                 return "All limits and locks cleared"
@@ -612,10 +656,6 @@ if __name__ == "__main__":
     server_thread.daemon = True
     server_thread.start()
 
-    # Start the enforcement monitor (checks time limits and locks PC when reached)
-    monitor_thread = threading.Thread(target=control.run_monitor, daemon=True)
-    monitor_thread.start()
-    
     # Verify server started
     time.sleep(1)  # Give server time to start
     if not remote.running:
@@ -625,7 +665,12 @@ if __name__ == "__main__":
             "Server Error"
         )
         sys.exit(1)
-    
+
+    # Start the enforcement monitor only once the server is confirmed up, so a
+    # failed startup can't lock the screen on its way to sys.exit(1).
+    monitor_thread = threading.Thread(target=control.run_monitor, daemon=True)
+    monitor_thread.start()
+
     print("Server is running. Press Ctrl+C to stop.")
     
     try:
