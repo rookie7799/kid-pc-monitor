@@ -275,8 +275,9 @@ class PCTimeControl:
             if min_remaining is None or minutes_until_lock < min_remaining:
                 min_remaining = minutes_until_lock
 
-        # Check usage limit
-        if usage_limit:
+        # Check usage limit. Use `is not None` so a limit of 0 (lock immediately)
+        # is honoured rather than treated as "no limit" by a falsy check.
+        if usage_limit is not None:
             usage_minutes = (current_time - start_time).total_seconds() / 60
             minutes_until_limit = usage_limit - usage_minutes
 
@@ -334,8 +335,9 @@ class PCTimeControl:
                 current_time.minute == lock_time.minute):
                 return True, "Scheduled lock time reached"
 
-        # Check usage limit
-        if usage_limit:
+        # Check usage limit. Use `is not None` so a limit of 0 (lock immediately)
+        # is honoured rather than treated as "no limit" by a falsy check.
+        if usage_limit is not None:
             usage_minutes = (current_time - start_time).total_seconds() / 60
             if usage_minutes >= usage_limit:
                 return True, f"Usage limit of {usage_limit} minutes reached"
