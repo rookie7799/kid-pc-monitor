@@ -15,6 +15,7 @@ import json
 
 import logging
 from pathlib import Path
+from warning_logic import warnings_to_send
 
 # ============================================
 # CONFIGURATION
@@ -67,7 +68,7 @@ class PCTimeControl:
         self.current_user = getpass.getuser()
         self.state_file = 'pc_control_state.json'
         self.logger = logging.getLogger('PCTimeControl')
-        self.warnings_sent = set()  # Track which warnings have been sent
+        self.warnings_sent = set()  # Threshold minutes already announced this episode
         self.warning_intervals = [15, 5, 1]  # Warning times in minutes before lock
         self.last_remaining = None  # Previous remaining minutes, for crossing detection
 
@@ -278,7 +279,8 @@ class PCTimeControl:
     def check_and_send_warnings(self):
         """Check if warnings should be sent and send them.
 
-        A warning fires only when the remaining time *crosses down* through a
+        Delegates the crossing decision to warning_logic.warnings_to_send: a
+        warning fires only when the remaining time crosses down through a
         threshold (the previous tick was above it, this tick is at or below it).
         This avoids over-stating the time: if the kid is granted only 10
         minutes, the 15-minute warning never fires because the time never
@@ -294,28 +296,19 @@ class PCTimeControl:
         previous = self.last_remaining
         self.last_remaining = time_remaining
 
-        # Nothing to cross from on the first observation after a (re)set.
-        if previous is None:
-            return
+        for warning_mins in warnings_to_send(previous, time_remaining,
+                                              self.warning_intervals,
+                                              self.warnings_sent):
+            self.warnings_sent.add(warning_mins)
 
-        # Check each warning interval
-        for warning_mins in self.warning_intervals:
-            warning_key = f"{warning_mins}min"
+            if warning_mins == 1:
+                msg = "⚠️ Computer will lock in 1 minute!"
+            else:
+                msg = f"⚠️ Computer will lock in {warning_mins} minutes!"
 
-            # Fire only when this tick crosses the threshold from above and we
-            # haven't already sent it.
-            if (previous > warning_mins >= time_remaining
-                    and warning_key not in self.warnings_sent):
-                self.warnings_sent.add(warning_key)
-
-                if warning_mins == 1:
-                    msg = "⚠️ Computer will lock in 1 minute!"
-                else:
-                    msg = f"⚠️ Computer will lock in {warning_mins} minutes!"
-
-                self.show_message(msg, "Warning")
-                self.logger.info(f"Warning sent: {warning_mins} minutes remaining")
-                print(f"[{datetime.now():%H:%M:%S}] Warning: {warning_mins} minutes until lock")
+            self.show_message(msg, "Warning")
+            self.logger.info(f"Warning sent: {warning_mins} minutes remaining")
+            print(f"[{datetime.now():%H:%M:%S}] Warning: {warning_mins} minutes until lock")
 
     def check_time_limits(self):
         """Check if any time limits have been reached"""
