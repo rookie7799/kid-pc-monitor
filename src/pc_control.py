@@ -15,7 +15,11 @@ import json
 
 import logging
 from pathlib import Path
-from warning_logic import warnings_to_send
+from warning_logic import (
+    warnings_to_send,
+    initial_remaining_notice,
+    format_remaining_message,
+)
 
 # ============================================
 # CONFIGURATION
@@ -295,6 +299,17 @@ class PCTimeControl:
 
         previous = self.last_remaining
         self.last_remaining = time_remaining
+
+        # On the first reading after a (re)set, tell a late-logging-in kid how
+        # much time is actually left instead of staying silent until the next
+        # interval is crossed.
+        notice = initial_remaining_notice(previous, time_remaining,
+                                          self.warning_intervals)
+        if notice is not None:
+            msg = format_remaining_message(notice)
+            self.show_message(msg, "Warning")
+            self.logger.info(f"Initial time notice: {notice:.2f} minutes remaining")
+            print(f"[{datetime.now():%H:%M:%S}] {msg}")
 
         for warning_mins in warnings_to_send(previous, time_remaining,
                                               self.warning_intervals,

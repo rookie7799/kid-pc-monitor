@@ -8,7 +8,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from warning_logic import warnings_to_send  # noqa: E402
+from warning_logic import (  # noqa: E402
+    warnings_to_send,
+    initial_remaining_notice,
+    format_remaining_message,
+)
 
 INTERVALS = [15, 5, 1]
 
@@ -69,7 +73,41 @@ def test_simulated_grants():
     check("30 sec", simulate(0.5), [])
 
 
+def test_initial_remaining_notice():
+    # Only on the first reading (previous is None).
+    check("not first reading -> none",
+          initial_remaining_notice(10, 8, INTERVALS), None)
+    # No active limit.
+    check("no limit -> none", initial_remaining_notice(None, None, INTERVALS), None)
+    # Already expired.
+    check("expired -> none", initial_remaining_notice(None, 0, INTERVALS), None)
+    # Above the largest interval: let the normal crossings handle it.
+    check("above top interval -> none",
+          initial_remaining_notice(None, 20, INTERVALS), None)
+    # Logging in below the top interval: announce the actual time left now.
+    check("login at 12 -> 12", initial_remaining_notice(None, 12, INTERVALS), 12)
+    check("login at exactly 15 -> 15",
+          initial_remaining_notice(None, 15, INTERVALS), 15)
+    check("login under a minute -> 0.5",
+          initial_remaining_notice(None, 0.5, INTERVALS), 0.5)
+
+
+def test_format_remaining_message():
+    check("12 min", format_remaining_message(12), "⚠️ You have 12 minutes left!")
+    check("1 min singular", format_remaining_message(1), "⚠️ You have 1 minute left!")
+    # Floors rather than over-stating.
+    check("7.9 min floors to 7",
+          format_remaining_message(7.9), "⚠️ You have 7 minutes left!")
+    # Under a minute switches to a seconds-based save prompt.
+    check("30 sec", format_remaining_message(0.5),
+          "⚠️ Attention: 30 seconds left, save!")
+    check("never zero seconds", format_remaining_message(0.005),
+          "⚠️ Attention: 1 seconds left, save!")
+
+
 if __name__ == "__main__":
     test_warnings_to_send()
     test_simulated_grants()
+    test_initial_remaining_notice()
+    test_format_remaining_message()
     print("\nAll warning_logic tests passed.")
