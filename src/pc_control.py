@@ -15,6 +15,11 @@ import json
 
 import logging
 from pathlib import Path
+from warning_logic import (
+    warnings_to_send,
+    initial_remaining_notice,
+    format_remaining_message,
+)
 
 # ============================================
 # CONFIGURATION
@@ -67,8 +72,9 @@ class PCTimeControl:
         self.current_user = getpass.getuser()
         self.state_file = 'pc_control_state.json'
         self.logger = logging.getLogger('PCTimeControl')
-        self.warnings_sent = set()  # Track which warnings have been sent
+        self.warnings_sent = set()  # Threshold minutes already announced this episode
         self.warning_intervals = [15, 5, 1]  # Warning times in minutes before lock
+        self.last_remaining = None  # Previous remaining minutes, for crossing detection
 
         # Log which user we're running as
         if self.should_monitor_user():
@@ -275,28 +281,49 @@ class PCTimeControl:
         return min_remaining
 
     def check_and_send_warnings(self):
-        """Check if warnings should be sent and send them"""
+        """Check if warnings should be sent and send them.
+
+        Delegates the crossing decision to warning_logic.warnings_to_send: a
+        warning fires only when the remaining time crosses down through a
+        threshold (the previous tick was above it, this tick is at or below it).
+        This avoids over-stating the time: if the kid is granted only 10
+        minutes, the 15-minute warning never fires because the time never
+        actually started above 15. last_remaining is reset to None whenever the
+        limit changes so the next limit re-arms crossing from a clean slate.
+        """
         time_remaining = self.get_time_remaining()
 
         if time_remaining is None:
+            self.last_remaining = None
             return
 
-        # Check each warning interval
-        for warning_mins in self.warning_intervals:
-            warning_key = f"{warning_mins}min"
+        previous = self.last_remaining
+        self.last_remaining = time_remaining
 
-            # If we're within the warning window and haven't sent this warning yet
-            if time_remaining <= warning_mins and warning_key not in self.warnings_sent:
-                self.warnings_sent.add(warning_key)
+        # On the first reading after a (re)set, tell a late-logging-in kid how
+        # much time is actually left instead of staying silent until the next
+        # interval is crossed.
+        notice = initial_remaining_notice(previous, time_remaining,
+                                          self.warning_intervals)
+        if notice is not None:
+            msg = format_remaining_message(notice)
+            self.show_message(msg, "Warning")
+            self.logger.info(f"Initial time notice: {notice:.2f} minutes remaining")
+            print(f"[{datetime.now():%H:%M:%S}] {msg}")
 
-                if warning_mins == 1:
-                    msg = "⚠️ Computer will lock in 1 minute!"
-                else:
-                    msg = f"⚠️ Computer will lock in {warning_mins} minutes!"
+        for warning_mins in warnings_to_send(previous, time_remaining,
+                                              self.warning_intervals,
+                                              self.warnings_sent):
+            self.warnings_sent.add(warning_mins)
 
-                self.show_message(msg, "Warning")
-                self.logger.info(f"Warning sent: {warning_mins} minutes remaining")
-                print(f"[{datetime.now():%H:%M:%S}] Warning: {warning_mins} minutes until lock")
+            if warning_mins == 1:
+                msg = "⚠️ Computer will lock in 1 minute!"
+            else:
+                msg = f"⚠️ Computer will lock in {warning_mins} minutes!"
+
+            self.show_message(msg, "Warning")
+            self.logger.info(f"Warning sent: {warning_mins} minutes remaining")
+            print(f"[{datetime.now():%H:%M:%S}] Warning: {warning_mins} minutes until lock")
 
     def check_time_limits(self):
         """Check if any time limits have been reached"""
@@ -486,6 +513,7 @@ class RemoteControlServer:
                     self.pc_control.set_usage_limit(minutes)
                     self.pc_control.start_time = datetime.now()  # Reset start time when setting new limit
                     self.pc_control.warnings_sent.clear()  # Clear warnings for new limit
+                    self.pc_control.last_remaining = None  # Re-arm crossing detection
                     self.pc_control.save_state()  # Save state after setting limit
                     return f"Usage limit set to {minutes} minutes"
                 except ValueError:
@@ -521,6 +549,7 @@ class RemoteControlServer:
             elif command == "CLEAR_LOCK_TIMES":
                 self.pc_control.lock_times = []
                 self.pc_control.warnings_sent.clear()  # Clear warnings too
+                self.pc_control.last_remaining = None  # Re-arm crossing detection
                 self.pc_control.save_state()
                 self.logger.info("All scheduled lock times cleared")
                 return "All scheduled lock times cleared"
@@ -529,6 +558,7 @@ class RemoteControlServer:
                 self.pc_control.usage_limit = None
                 self.pc_control.lock_times = []
                 self.pc_control.warnings_sent.clear()
+                self.pc_control.last_remaining = None  # Re-arm crossing detection
                 self.pc_control.save_state()
                 self.logger.info("All limits and locks cleared")
                 return "All limits and locks cleared"
