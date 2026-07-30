@@ -5,9 +5,13 @@ import datetime
 import ctypes
 import socket
 import threading
-import tkinter as tk
-from tkinter import messagebox
-from datetime import datetime, time as dtime
+try:
+    import tkinter as tk
+    from tkinter import messagebox
+except ImportError:  # Allows logic tests on systems without Tk installed.
+    tk = None
+    messagebox = None
+from datetime import datetime, time as dtime, timedelta
 import subprocess
 from ctypes import wintypes
 import getpass
@@ -58,6 +62,9 @@ if sys.stdout is None or sys.stderr is None:
         sys.stderr = _console_log
 
 class PCTimeControl:
+    MONITOR_INTERVAL_SECONDS = 1
+    LOCK_RETRY_SECONDS = 10
+
     def __init__(self):
         self.lock_times = []
         self.usage_limit = None
@@ -119,8 +126,10 @@ class PCTimeControl:
                     current_date = datetime.now().date()
                     saved_date = saved_start_time.date()
 
-                    # If start_time is from a previous day, reset it to today
-                    if saved_date < current_date:
+                    # A usage limit is daily. Never carry elapsed time across
+                    # a date boundary (also recover safely from a future date
+                    # caused by a clock correction).
+                    if saved_date != current_date:
                         self.start_time = datetime.now()
                         self.logger.info(f"Start time was from {saved_date}, reset to today")
                         print(f"[{datetime.now():%H:%M:%S}] Usage timer reset for new day")
@@ -149,6 +158,22 @@ class PCTimeControl:
             self.logger.info("State saved successfully")
         except Exception as e:
             self.logger.error(f"Error saving state: {e}")
+
+    def reset_daily_usage_if_needed(self, current_time=None):
+        """Reset the daily usage window when the calendar day changes."""
+        current_time = current_time or datetime.now()
+        if self.start_time.date() == current_time.date():
+            return False
+
+        previous_date = self.start_time.date()
+        self.start_time = current_time
+        self.warnings_sent.clear()
+        self.save_state()
+        self.logger.info(
+            "Usage timer reset for new day (previous start date: %s)",
+            previous_date,
+        )
+        return True
 
     def check_if_locked(self):
         """
@@ -198,6 +223,8 @@ class PCTimeControl:
         def display():
             root = None
             try:
+                if tk is None or messagebox is None:
+                    raise RuntimeError("Tkinter is not available")
                 root = tk.Tk()
                 root.withdraw()  # Hide the main window
                 root.attributes('-topmost', True)  # Make it appear on top
@@ -243,12 +270,13 @@ class PCTimeControl:
         """Cancel pending shutdown"""
         os.system('shutdown /a')
 
-    def get_time_remaining(self):
+    def get_time_remaining(self, current_time=None):
         """Calculate minutes remaining until lock. Returns None if no limit set."""
         if not self.should_monitor_user():
             return None
 
-        current_time = datetime.now()
+        current_time = current_time or datetime.now()
+        self.reset_daily_usage_if_needed(current_time)
         min_remaining = None
 
         # Check scheduled lock times
@@ -257,7 +285,7 @@ class PCTimeControl:
 
             # If lock time is earlier today, it's for tomorrow
             if lock_datetime <= current_time:
-                lock_datetime = lock_datetime.replace(day=lock_datetime.day + 1)
+                lock_datetime += timedelta(days=1)
 
             minutes_until_lock = (lock_datetime - current_time).total_seconds() / 60
 
@@ -298,13 +326,14 @@ class PCTimeControl:
                 self.logger.info(f"Warning sent: {warning_mins} minutes remaining")
                 print(f"[{datetime.now():%H:%M:%S}] Warning: {warning_mins} minutes until lock")
 
-    def check_time_limits(self):
+    def check_time_limits(self, current_time=None):
         """Check if any time limits have been reached"""
         # Skip all checks if user is exempt from monitoring
         if not self.should_monitor_user():
             return False, ""
 
-        current_time = datetime.now()
+        current_time = current_time or datetime.now()
+        self.reset_daily_usage_if_needed(current_time)
 
         # Check scheduled lock times
         for lock_time in self.lock_times:
@@ -322,19 +351,27 @@ class PCTimeControl:
         return False, ""
 
     def run_monitor(self):
-        """Main monitoring loop"""
+        """Continuously enforce limits, including after a manual unlock."""
         print("PC Time Control is running...")
         while True:
-            # Check and send warnings if approaching time limit
-            self.check_and_send_warnings()
+            try:
+                # Check and send warnings if approaching time limit
+                self.check_and_send_warnings()
 
-            # Check if time limit reached
-            should_lock, reason = self.check_time_limits()
-            if should_lock:
-                print(f"Locking PC: {reason}")
-                self.lock_pc()
-                break
-            time.sleep(1)
+                # Keep enforcing an expired limit. Avoid repeatedly calling
+                # LockWorkStation while the workstation is already locked;
+                # after an unlock the next retry locks it again.
+                should_lock, reason = self.check_time_limits()
+                if should_lock and not self.check_if_locked():
+                    print(f"Locking PC: {reason}")
+                    self.lock_pc()
+                    time.sleep(self.LOCK_RETRY_SECONDS)
+                    continue
+
+                time.sleep(self.MONITOR_INTERVAL_SECONDS)
+            except Exception:
+                self.logger.exception("Unexpected error in monitoring loop")
+                time.sleep(self.LOCK_RETRY_SECONDS)
 
 # Simple Remote Control Server
 class RemoteControlServer:
@@ -611,6 +648,11 @@ if __name__ == "__main__":
     server_thread = threading.Thread(target=remote.start_server, args=(control,))
     server_thread.daemon = True
     server_thread.start()
+
+    # Enforce automatic usage and scheduled limits independently from the
+    # remote-control server.
+    monitor_thread = threading.Thread(target=control.run_monitor, daemon=True)
+    monitor_thread.start()
     
     # Verify server started
     time.sleep(1)  # Give server time to start
