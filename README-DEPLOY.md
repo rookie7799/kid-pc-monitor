@@ -75,22 +75,25 @@ cd ~/kid-pc-monitor/src
 From an allowed parent device, open `http://<lxc-ip>:5000`. Stop the manual
 process before installing the service.
 
-## 3. Enable the user service
+## 3. Enable the system service
 
 ```bash
-cd ~/kid-pc-monitor
-chmod +x scripts/install_web_panel_linux.sh
-./scripts/install_web_panel_linux.sh install
-./scripts/install_web_panel_linux.sh status
-sudo loginctl enable-linger "$USER"
+sudo useradd --system --home-dir /opt/kid-pc-monitor \
+  --no-create-home --shell /usr/sbin/nologin kidmonitor
+sudo install -d -o kidmonitor -g kidmonitor \
+  /opt/kid-pc-monitor/src/templates
+sudo install -m 0644 deploy/kid-pc-monitor-web-panel.service \
+  /etc/systemd/system/kid-pc-monitor-web-panel.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now kid-pc-monitor-web-panel.service
 ```
 
 Useful checks:
 
 ```bash
-systemctl --user is-enabled kid-pc-monitor-web-panel.service
-systemctl --user is-active kid-pc-monitor-web-panel.service
-journalctl --user -u kid-pc-monitor-web-panel.service -n 100 --no-pager
+systemctl is-enabled kid-pc-monitor-web-panel.service
+systemctl is-active kid-pc-monitor-web-panel.service
+journalctl -u kid-pc-monitor-web-panel.service -n 100 --no-pager
 ss -ltnp | grep ':5000'
 ```
 
