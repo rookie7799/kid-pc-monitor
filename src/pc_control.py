@@ -38,8 +38,36 @@ EXEMPT_USERS = []
 
 # ============================================
 
+DATA_DIR_ENV = 'KID_PC_MONITOR_DATA_DIR'
+DATA_DIR_NAME = 'KidPCMonitor'
+
+
+def resolve_data_dir(environ=None):
+    """Return a writable per-user directory for agent state and logs.
+
+    Installed code can live under Program Files, where a standard child account
+    correctly has no write access. Windows exposes LOCALAPPDATA for the account
+    that owns the interactive scheduled task, so mutable files belong there.
+    The explicit override is useful for tests and controlled deployments. On
+    non-Windows systems we preserve the historical current-directory behavior.
+    """
+    environ = os.environ if environ is None else environ
+    override = environ.get(DATA_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
+
+    local_appdata = environ.get('LOCALAPPDATA')
+    if local_appdata:
+        return Path(local_appdata) / DATA_DIR_NAME
+
+    return Path.cwd()
+
+
+DATA_DIR = resolve_data_dir()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 # Set up logging
-log_file = 'pc_control.log'
+log_file = DATA_DIR / 'pc_control.log'
 if os.path.exists(log_file):
     os.unlink(log_file) #remove previous log
 
@@ -55,7 +83,7 @@ logging.basicConfig(
 # AttributeError, killing the agent before the server can bind port 9999.
 # Redirect them to a file so print() is safe and its output is captured.
 if sys.stdout is None or sys.stderr is None:
-    _console_log = open('pc_control.out.log', 'a', buffering=1, encoding='utf-8')
+    _console_log = open(DATA_DIR / 'pc_control.out.log', 'a', buffering=1, encoding='utf-8')
     if sys.stdout is None:
         sys.stdout = _console_log
     if sys.stderr is None:
@@ -72,7 +100,7 @@ class PCTimeControl:
         self.is_locked = False
         self.last_activity = datetime.now()
         self.current_user = getpass.getuser()
-        self.state_file = 'pc_control_state.json'
+        self.state_file = DATA_DIR / 'pc_control_state.json'
         self.logger = logging.getLogger('PCTimeControl')
         self.warnings_sent = set()  # Track which warnings have been sent
         self.warning_intervals = [15, 5, 1]  # Warning times in minutes before lock

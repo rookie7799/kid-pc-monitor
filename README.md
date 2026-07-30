@@ -244,7 +244,8 @@ EXEMPT_USERS = []
 **Use Case:** If multiple family members share one PC, you can restrict only the children's accounts while leaving parent accounts unrestricted.
 
 ### Persistent State
-Settings are automatically saved to `pc_control_state.json` including:
+Settings are automatically saved to
+`%LOCALAPPDATA%\KidPCMonitor\pc_control_state.json` including:
 - Daily usage limits
 - Scheduled lock times
 - Start time for usage tracking
@@ -296,8 +297,9 @@ nothing shows up, see the task-troubleshooting note below.
 - It runs when you start it manually but not as a task: that confirms the above —
   manual runs use *your* logged-in session, the task uses the account it was
   created for.
-- Check the agent's logs in the **`src` folder** (the task's working directory):
-  `pc_control.log` (look for `Server started on port 9999`) and `pc_control.out.log`.
+- Check the agent's logs in **`%LOCALAPPDATA%\KidPCMonitor`**:
+  `pc_control.log` (look for `Server started on port 9999`) and
+  `pc_control.out.log`.
 
 ## 🛡️ Security Notes
 

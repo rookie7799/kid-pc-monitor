@@ -53,5 +53,25 @@ class TimeLimitTests(unittest.TestCase):
         self.assertEqual(reason, "")
 
 
+class DataDirectoryTests(unittest.TestCase):
+    def test_uses_local_appdata_for_installed_windows_agent(self):
+        data_dir = pc_control.resolve_data_dir({
+            "LOCALAPPDATA": r"C:\Users\Kids\AppData\Local",
+        })
+
+        self.assertEqual(
+            data_dir,
+            Path(r"C:\Users\Kids\AppData\Local") / "KidPCMonitor",
+        )
+
+    def test_explicit_data_directory_override_takes_precedence(self):
+        data_dir = pc_control.resolve_data_dir({
+            "KID_PC_MONITOR_DATA_DIR": r"D:\AgentData",
+            "LOCALAPPDATA": r"C:\Users\Kids\AppData\Local",
+        })
+
+        self.assertEqual(data_dir, Path(r"D:\AgentData"))
+
+
 if __name__ == "__main__":
     unittest.main()
