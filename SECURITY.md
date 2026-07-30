@@ -39,7 +39,8 @@ The first release assumes:
 3. Do not publish TCP 5000 or 9999 through the router or a public reverse proxy.
 4. Give children standard accounts only; password-protect parent accounts.
 5. Prevent child accounts from changing Task Scheduler, firewall configuration,
-   the agent code, and its state where Windows permissions permit.
+   and the agent code. The code belongs under `Program Files`; mutable state and
+   logs belong under the monitored user's `%LOCALAPPDATA%\KidPCMonitor`.
 6. Keep a known-good copy of configuration and record the deployed Git commit.
 7. Review `pc_control.log` and service logs after failures or unexpected locks.
 8. Apply operating-system and Python security updates.
