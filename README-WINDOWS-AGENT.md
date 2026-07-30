@@ -16,8 +16,8 @@ step below before relying on it.
 Install Python 3 and Git. In an elevated PowerShell or Command Prompt:
 
 ```powershell
-git clone <your-fork-url> C:\KidPCMonitor
-cd C:\KidPCMonitor
+git clone <your-fork-url> "C:\Program Files\KidPCMonitor"
+cd "C:\Program Files\KidPCMonitor"
 git rev-parse --short HEAD
 ```
 
@@ -99,7 +99,10 @@ Expected listener:
 0.0.0.0:9999 ... LISTENING
 ```
 
-Agent logs and saved state are in `C:\KidPCMonitor\src`:
+The installed code remains protected under `C:\Program Files\KidPCMonitor`.
+Agent logs and saved state are writable per-user data under
+`%LOCALAPPDATA%\KidPCMonitor` (for example,
+`C:\Users\Child\AppData\Local\KidPCMonitor`):
 
 ```text
 pc_control.log
