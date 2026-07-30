@@ -24,22 +24,26 @@ Suggested starting resources:
 | CPU | 1 vCPU |
 | RAM | 512 MB–1 GB |
 | Disk | 8 GB |
-| Network | Static/reserved IPv4 on the home LAN |
+| Network | DHCP client; reservation managed on the router |
 
-Do not reuse an address until it has been checked against DHCP reservations,
-Proxmox guests, and live hosts.
+Network policy for this homelab: keep the LXC configured as a DHCP client.
+Permanent addresses and DHCP reservations are managed only on the router. Do
+not configure a static address, gateway, or DNS override in the Proxmox guest
+configuration or inside the container.
 
 ## 1. Create the LXC
 
-Create an unprivileged container in Proxmox, enable start at boot, and assign a
-DHCP reservation or static address. Do not enable nesting or privileged mode;
-the Flask panel does not need either.
+Create an unprivileged container in Proxmox, enable start at boot, and configure
+its interface with `ip=dhcp`. Do not enable nesting or privileged mode; the
+Flask panel does not need either. Use the generated interface MAC address to
+create or change the reservation on the router.
 
 Record these deployment values before continuing:
 
 ```text
 LXC VMID:          <vmid>
 LXC IP:            <lxc-ip>
+LXC MAC:           <lxc-mac>
 Parent device IPs: <parent-ip-1>, <parent-ip-2>
 Child PC IPs:      <child-ip-1>, <child-ip-2>
 ```
