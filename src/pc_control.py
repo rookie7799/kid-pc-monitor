@@ -93,17 +93,44 @@ class PCTimeControl:
     MONITOR_INTERVAL_SECONDS = 1
     LOCK_RETRY_SECONDS = 10
 
+    def _get_console_user(self):
+        """Return the username of the active console session, or None.
+
+        Uses PowerShell to avoid locale-dependent parsing of ``query user``.
+        """
+        try:
+            out = subprocess.check_output(
+                [
+                    'powershell', '-NoProfile', '-Command',
+                    '(Get-CimInstance -ClassName Win32_ComputerSystem).UserName'
+                ],
+                text=True, timeout=10,
+            )
+            username = out.strip()
+            if username and '\\' in username:
+                return username.split('\\', 1)[1]
+            return username or None
+        except Exception:
+            pass
+        return None
+
     def __init__(self):
-        self.lock_times = []
         self.usage_limit = None
         self.start_time = datetime.now()
+        self.accrued_seconds = 0.0  # Active (unlocked) usage time accrued this day
         self.is_locked = False
         self.last_activity = datetime.now()
-        self.current_user = getpass.getuser()
+        self.current_user = self._get_console_user() or getpass.getuser()
         self.state_file = DATA_DIR / 'pc_control_state.json'
         self.logger = logging.getLogger('PCTimeControl')
         self.warnings_sent = set()  # Track which warnings have been sent
         self.warning_intervals = [15, 5, 1]  # Warning times in minutes before lock
+        # Allowed-usage window (default 07:00-22:00). Outside it the PC is locked.
+        self.allowed_start = dtime(7, 0)
+        self.allowed_end = dtime(22, 0)
+        # Temporary override: PC is unlocked until this datetime even if outside
+        # the window. None = no override. Does NOT reset usage counters.
+        self.unlock_until = None
 
         # Log which user we're running as
         if self.should_monitor_user():
@@ -120,8 +147,18 @@ class PCTimeControl:
         self.monitor_thread = threading.Thread(target=self.monitor_activity, daemon=True)
         self.monitor_thread.start()
 
+    def refresh_current_user(self):
+        """Update current_user from the active console session."""
+        console_user = self._get_console_user()
+        if console_user and console_user != self.current_user:
+            self.logger.info(
+                "User changed: %s -> %s", self.current_user, console_user
+            )
+            self.current_user = console_user
+
     def should_monitor_user(self):
         """Check if current user should be monitored based on configuration"""
+        self.refresh_current_user()
         # If MONITORED_USERS is specified, only monitor those users
         if MONITORED_USERS:
             return self.current_user in MONITORED_USERS
@@ -140,13 +177,30 @@ class PCTimeControl:
                 with open(self.state_file, 'r') as f:
                     state = json.load(f)
 
-                # Restore lock times
-                if 'lock_times' in state:
-                    self.lock_times = [dtime(*map(int, t.split(':'))) for t in state['lock_times']]
-
                 # Restore usage limit
                 if 'usage_limit' in state:
                     self.usage_limit = state['usage_limit']
+
+                # Restore accrued active usage time (default 0 for old states)
+                if 'accrued_seconds' in state:
+                    self.accrued_seconds = float(state['accrued_seconds'])
+                else:
+                    self.accrued_seconds = 0.0
+
+                # Restore allowed window (default 07:00-22:00 for old states)
+                if 'allowed_start' in state:
+                    self.allowed_start = dtime(*map(int, state['allowed_start'].split(':')))
+                if 'allowed_end' in state:
+                    self.allowed_end = dtime(*map(int, state['allowed_end'].split(':')))
+
+                # Restore temporary unlock override (if still in the future)
+                if state.get('unlock_until'):
+                    try:
+                        until = datetime.fromisoformat(state['unlock_until'])
+                        if until > datetime.now():
+                            self.unlock_until = until
+                    except (ValueError, TypeError):
+                        pass
 
                 # Restore start time (for usage tracking)
                 if 'start_time' in state:
@@ -164,7 +218,7 @@ class PCTimeControl:
                     else:
                         self.start_time = saved_start_time
 
-                self.logger.info(f"State loaded: {len(self.lock_times)} lock times, usage limit: {self.usage_limit}")
+                self.logger.info(f"State loaded: usage limit: {self.usage_limit}")
                 print(f"[{datetime.now():%H:%M:%S}] Loaded previous settings from {self.state_file}")
         except Exception as e:
             self.logger.error(f"Error loading state: {e}")
@@ -174,8 +228,11 @@ class PCTimeControl:
         """Save current state to JSON file"""
         try:
             state = {
-                'lock_times': [f"{lt.hour}:{lt.minute}" for lt in self.lock_times],
                 'usage_limit': self.usage_limit,
+                'accrued_seconds': round(self.accrued_seconds, 1),
+                'allowed_start': f"{self.allowed_start.hour:02d}:{self.allowed_start.minute:02d}",
+                'allowed_end': f"{self.allowed_end.hour:02d}:{self.allowed_end.minute:02d}",
+                'unlock_until': self.unlock_until.isoformat() if self.unlock_until else None,
                 'start_time': self.start_time.isoformat(),
                 'current_user': self.current_user
             }
@@ -195,6 +252,7 @@ class PCTimeControl:
 
         previous_date = self.start_time.date()
         self.start_time = current_time
+        self.accrued_seconds = 0.0
         self.warnings_sent.clear()
         self.save_state()
         self.logger.info(
@@ -223,7 +281,8 @@ class PCTimeControl:
             return False
 
     def monitor_activity(self):
-        """Monitor lock/unlock status"""
+        """Monitor lock/unlock status and accrue active (unlocked) usage time."""
+        last = time.monotonic()
         while True:
             actual_locked = self.check_if_locked()
 
@@ -234,53 +293,100 @@ class PCTimeControl:
 
             # Detect manual lock (not by our script)
             elif not self.is_locked and actual_locked:
+                self.is_locked = True
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] PC has been locked (detected)")
 
-            time.sleep(3)  # Check every 3 seconds
+            # Accrue active usage only while the PC is unlocked AND the console
+            # user is monitored. A lock (or an exempt parent) pauses the timer.
+            now = time.monotonic()
+            delta = now - last
+            last = now
+            if not self.is_locked and self.should_monitor_user():
+                self.reset_daily_usage_if_needed()
+                if self.usage_limit:
+                    self.accrued_seconds += delta
+                    if int(self.accrued_seconds) % 30 == 0:
+                        self.save_state()
 
-    def add_scheduled_lock(self, hour, minute):
-        """Add a time when the PC should be locked"""
-        self.lock_times.append(dtime(hour, minute))
+            time.sleep(3)  # Check every 3 seconds
 
     def set_usage_limit(self, minutes):
         """Set maximum usage time in minutes"""
         self.usage_limit = minutes
 
     def show_message(self, message, title="PC Time Control"):
-        """Display a message using tkinter"""
-        def display():
+        """Display a message to the current user.
+
+        Uses msg.exe (works from any session, including Session 0) with a
+        tkinter fallback for interactive desktop sessions.
+        """
+        def _show_via_msg():
+            try:
+                # Use the current console user, not the cached value
+                user = self._get_console_user() or self.current_user
+                subprocess.run(
+                    ['msg', user, '/TIME:60', message],
+                    capture_output=True, timeout=65,
+                )
+                self.logger.info(f"Message sent to {user} via msg.exe")
+            except Exception as e:
+                self.logger.error(f"msg.exe failed: {e}")
+
+        def _show_via_tk():
             root = None
             try:
                 if tk is None or messagebox is None:
                     raise RuntimeError("Tkinter is not available")
                 root = tk.Tk()
-                root.withdraw()  # Hide the main window
-                root.attributes('-topmost', True)  # Make it appear on top
-
-                # Auto-close after 60 seconds to prevent hanging
+                root.withdraw()
+                root.attributes('-topmost', True)
                 root.after(60000, root.destroy)
-
                 messagebox.showwarning(title, message)
             except Exception as e:
-                self.logger.error(f"Error showing message: {e}")
-                print(f"[{datetime.now():%H:%M:%S}] Error showing message: {e}")
+                self.logger.error(f"Tkinter message failed: {e}")
             finally:
                 if root:
                     try:
                         root.quit()
                         root.destroy()
                     except Exception:
-                        pass  # Already destroyed
+                        pass
 
-        # Run in a separate thread to avoid blocking
-        threading.Thread(target=display, daemon=True).start()
+        # Try msg.exe first (works from Session 0), fall back to tkinter
+        threading.Thread(target=_show_via_msg, daemon=True).start()
 
     def lock_pc(self):
-        """Lock the Windows PC"""
+        """Lock the Windows PC (active console session).
+
+        When running as SYSTEM (Session 0), LockWorkStation locks the wrong
+        session.  We locate the console session ID via ``query session``
+        (the word "console" in the SESSIONNAME column is always English)
+        and log it off, which forces the lock screen.
+        """
         try:
             self.is_locked = True
-            ctypes.windll.user32.LockWorkStation()
-            self.logger.info("PC locked successfully")
+            result = subprocess.run(
+                'query session', shell=True,
+                capture_output=True, text=True, timeout=10,
+            )
+            session_id = None
+            for line in result.stdout.splitlines():
+                if 'console' in line.lower():
+                    parts = line.split()
+                    for p in parts:
+                        if p.isdigit():
+                            session_id = p
+                            break
+                    break
+            if session_id:
+                subprocess.run(
+                    ['logoff', session_id],
+                    capture_output=True, timeout=10,
+                )
+                self.logger.info("PC locked (session %s)", session_id)
+            else:
+                ctypes.windll.user32.LockWorkStation()
+                self.logger.info("PC locked (fallback)")
         except Exception as e:
             self.logger.error(f"Error locking PC: {e}")
             print(f"[{datetime.now():%H:%M:%S}] Error locking PC: {e}")
@@ -298,6 +404,47 @@ class PCTimeControl:
         """Cancel pending shutdown"""
         os.system('shutdown /a')
 
+    def is_within_allowed_window(self, current_time=None):
+        """Return True if current time is inside the allowed usage window.
+
+        A temporary unlock override (unlock_until) lets the PC be used outside
+        the window without resetting the usage counters.
+        """
+        current_time = current_time or datetime.now()
+        # Temporary override is active: allow regardless of the window.
+        if self.unlock_until and current_time < self.unlock_until:
+            return True
+        # Override expired — clear it and fall through to the window check.
+        if self.unlock_until and current_time >= self.unlock_until:
+            self.unlock_until = None
+            self.save_state()
+        now = dtime(current_time.hour, current_time.minute)
+        if self.allowed_start <= self.allowed_end:
+            return self.allowed_start <= now <= self.allowed_end
+        # Window crosses midnight (e.g. 22:00-07:00): outside is locked.
+        return now >= self.allowed_start or now <= self.allowed_end
+
+    def unlock_for(self, minutes):
+        """Grant a one-time unlock for `minutes` minutes beyond the window.
+
+        Does NOT reset accrued usage time or the daily limit; the daily limit
+        continues to apply inside the override.
+        """
+        self.unlock_until = datetime.now() + timedelta(minutes=minutes)
+        self.save_state()
+        self.logger.info("Temporary unlock granted until %s", self.unlock_until)
+        return self.unlock_until
+
+    def set_allowed_window(self, start, end):
+        """Set the allowed usage window (start/end as datetime.time)."""
+        self.allowed_start = start
+        self.allowed_end = end
+        self.save_state()
+        self.logger.info(
+            "Allowed window set to %02d:%02d - %02d:%02d",
+            start.hour, start.minute, end.hour, end.minute,
+        )
+
     def get_time_remaining(self, current_time=None):
         """Calculate minutes remaining until lock. Returns None if no limit set."""
         if not self.should_monitor_user():
@@ -307,22 +454,9 @@ class PCTimeControl:
         self.reset_daily_usage_if_needed(current_time)
         min_remaining = None
 
-        # Check scheduled lock times
-        for lock_time in self.lock_times:
-            lock_datetime = current_time.replace(hour=lock_time.hour, minute=lock_time.minute, second=0, microsecond=0)
-
-            # If lock time is earlier today, it's for tomorrow
-            if lock_datetime <= current_time:
-                lock_datetime += timedelta(days=1)
-
-            minutes_until_lock = (lock_datetime - current_time).total_seconds() / 60
-
-            if min_remaining is None or minutes_until_lock < min_remaining:
-                min_remaining = minutes_until_lock
-
         # Check usage limit
         if self.usage_limit:
-            usage_minutes = (current_time - self.start_time).total_seconds() / 60
+            usage_minutes = self.accrued_seconds / 60.0
             minutes_until_limit = self.usage_limit - usage_minutes
 
             if min_remaining is None or minutes_until_limit < min_remaining:
@@ -363,18 +497,17 @@ class PCTimeControl:
         current_time = current_time or datetime.now()
         self.reset_daily_usage_if_needed(current_time)
 
-        # Check scheduled lock times
-        for lock_time in self.lock_times:
-            if (current_time.hour == lock_time.hour and
-                current_time.minute == lock_time.minute and
-                current_time.second < 1):
-                return True, "Scheduled lock time reached"
-
         # Check usage limit
         if self.usage_limit:
-            usage_minutes = (current_time - self.start_time).total_seconds() / 60
+            usage_minutes = self.accrued_seconds / 60.0
             if usage_minutes >= self.usage_limit:
                 return True, f"Usage limit of {self.usage_limit} minutes reached"
+
+        # Outside the allowed window the PC must be locked (re-locks on
+        # re-entry outside the window). This overrides the daily usage limit
+        # because availability is the harder constraint.
+        if not self.is_within_allowed_window(current_time):
+            return True, "Outside allowed usage window"
 
         return False, ""
 
@@ -521,11 +654,44 @@ class RemoteControlServer:
                     return str(self.pc_control.usage_limit)
                 return "None"
 
-            elif command == "GET_LOCK_TIMES":
-                if self.pc_control.lock_times:
-                    times = [f"{lt.hour}:{lt.minute:02d}" for lt in self.pc_control.lock_times]
-                    return ",".join(times)
-                return "None"
+            elif command == "GET_ALLOWED_WINDOW":
+                return (f"{self.pc_control.allowed_start.hour:02d}:{self.pc_control.allowed_start.minute:02d}"
+                        f"-{self.pc_control.allowed_end.hour:02d}:{self.pc_control.allowed_end.minute:02d}")
+
+            elif command.startswith("SET_ALLOWED_WINDOW:"):
+                try:
+                    start_s, end_s = command.split(":", 1)[1].split("-", 1)
+                    sh, sm = map(int, start_s.split(":"))
+                    eh, em = map(int, end_s.split(":"))
+                    self.pc_control.set_allowed_window(dtime(sh, sm), dtime(eh, em))
+                    return (f"Allowed window set to {sh:02d}:{sm:02d}-{eh:02d}:{em:02d}")
+                except (ValueError, TypeError):
+                    return "Invalid format (use HH:MM-HH:MM)"
+
+            elif command.startswith("UNLOCK:"):
+                try:
+                    minutes = int(command.split(":", 1)[1])
+                    if minutes <= 0:
+                        return "Invalid unlock duration"
+                    until = self.pc_control.unlock_for(minutes)
+                    return f"Temporary unlock until {until.strftime('%H:%M')}"
+                except (ValueError, TypeError):
+                    return "Invalid format (use UNLOCK:<minutes>)"
+
+            elif command == "CANCEL_UNLOCK":
+                if self.pc_control.unlock_until:
+                    self.pc_control.unlock_until = None
+                    self.pc_control.save_state()
+                    self.pc_control.logger.info("Temporary unlock cancelled")
+                    return "Temporary unlock cancelled"
+                return "No active temporary unlock"
+
+            elif command == "GET_UNLOCK_STATUS":
+                if self.pc_control.unlock_until:
+                    remaining = (self.pc_control.unlock_until - datetime.now()).total_seconds() / 60
+                    if remaining > 0:
+                        return f"ACTIVE {int(remaining)} minutes"
+                return "INACTIVE"
 
             elif command == "GET_TIME_REMAINING":
                 remaining = self.pc_control.get_time_remaining()
@@ -549,23 +715,14 @@ class RemoteControlServer:
                 try:
                     minutes = int(command.split(":", 1)[1])
                     self.pc_control.set_usage_limit(minutes)
-                    self.pc_control.start_time = datetime.now()  # Reset start time when setting new limit
+                    self.pc_control.start_time = datetime.now()  # Reset day anchor when setting new limit
+                    self.pc_control.accrued_seconds = 0.0  # Reset active usage for the new limit
                     self.pc_control.warnings_sent.clear()  # Clear warnings for new limit
                     self.pc_control.save_state()  # Save state after setting limit
                     return f"Usage limit set to {minutes} minutes"
                 except ValueError:
                     return "Invalid limit value"
 
-            elif command.startswith("ADD_LOCK_TIME:"):
-                try:
-                    time_str = command.split(":", 1)[1]
-                    hour, minute = map(int, time_str.split(":"))
-                    self.pc_control.add_scheduled_lock(hour, minute)
-                    self.pc_control.save_state()  # Save state after adding lock time
-                    return f"Lock time added: {hour:02d}:{minute:02d}"
-                except ValueError:
-                    return "Invalid time format (use HH:MM)"
-                    
             elif command.startswith("EXTEND_TIME:"):
                 try:
                     minutes = int(command.split(":", 1)[1])
@@ -583,16 +740,8 @@ class RemoteControlServer:
                 self.logger.info("Usage limit cleared")
                 return "Usage limit cleared"
 
-            elif command == "CLEAR_LOCK_TIMES":
-                self.pc_control.lock_times = []
-                self.pc_control.warnings_sent.clear()  # Clear warnings too
-                self.pc_control.save_state()
-                self.logger.info("All scheduled lock times cleared")
-                return "All scheduled lock times cleared"
-
             elif command == "CLEAR_ALL":
                 self.pc_control.usage_limit = None
-                self.pc_control.lock_times = []
                 self.pc_control.warnings_sent.clear()
                 self.pc_control.save_state()
                 self.logger.info("All limits and locks cleared")
@@ -607,14 +756,16 @@ class RemoteControlServer:
                     "GET_CURRENT_USER - Get current Windows username\n"
                     "GET_STATUS - Check if PC is locked\n"
                     "GET_USAGE_LIMIT - Get current usage limit\n"
-                    "GET_LOCK_TIMES - Get scheduled lock times\n"
                     "GET_TIME_REMAINING - Get time until next lock\n"
+                    "GET_ALLOWED_WINDOW - Get allowed usage window\n"
+                    "SET_ALLOWED_WINDOW:HH:MM-HH:MM - Set allowed usage window\n"
+                    "UNLOCK:<minutes> - Temporary unlock outside the window\n"
+                    "CANCEL_UNLOCK - Cancel temporary unlock\n"
+                    "GET_UNLOCK_STATUS - Active temporary unlock remaining\n"
                     "MESSAGE:<text> - Show popup message\n"
                     "SET_LIMIT:<minutes> - Set usage limit\n"
-                    "ADD_LOCK_TIME:HH:MM - Add scheduled lock\n"
                     "EXTEND_TIME:<minutes> - Extend usage time\n"
                     "CLEAR_USAGE_LIMIT - Remove usage limit\n"
-                    "CLEAR_LOCK_TIMES - Remove all scheduled locks\n"
                     "CLEAR_ALL - Clear all limits and locks"
                 )
                 
