@@ -1,4 +1,4 @@
-# Security Policy and Deployment Boundaries
+# Security Policy
 
 ## Current security status
 
@@ -24,7 +24,7 @@ rules are a required compensating control, not an optional hardening step.
 
 The first release assumes:
 
-- trusted parents administer Proxmox, the LXC, router, and Windows PCs;
+- trusted parents administer the panel server, the router, and the Windows PCs;
 - children use standard Windows accounts without administrator access;
 - the home LAN is trusted only where explicit source allow-lists say so;
 - no service port is forwarded from the internet;
@@ -34,29 +34,32 @@ The first release assumes:
 
 ## Required controls before use
 
-1. Restrict LXC TCP 5000 to fixed/reserved parent device addresses.
-2. Restrict every Windows TCP 9999 rule to the fixed/reserved LXC address.
-3. Do not publish TCP 5000 or 9999 through the router or a public reverse proxy.
+1. Restrict the panel TCP 5000 to fixed/reserved parent device addresses.
+2. Restrict every Windows TCP 9999 rule to the fixed/reserved panel server
+   address.
+3. Do not publish TCP 5000 or 9999 through the router or a public reverse
+   proxy.
 4. Give children standard accounts only; password-protect parent accounts.
 5. Prevent child accounts from changing Task Scheduler, firewall configuration,
-   and the agent code. The code belongs under `Program Files`; mutable state and
-   logs belong under the monitored user's `%LOCALAPPDATA%\KidPCMonitor`.
-6. Keep a known-good copy of configuration and record the deployed Git commit.
-7. Review `pc_control.log` and service logs after failures or unexpected locks.
+   and the agent code. The code belongs under a protected install location;
+   mutable state and logs belong under the monitored user's
+   `%LOCALAPPDATA%\KidPCMonitor`.
+6. Keep a known-good copy of configuration and record the deployed commit.
+7. Review the agent and panel logs after failures or unexpected locks.
 8. Apply operating-system and Python security updates.
 
 ## Secrets
 
 The baseline has no agent secret to store. Do not add passwords, tokens, private
-IP inventories, or Proxmox credentials to Git. Future authentication secrets
-must come from environment variables or protected host-local files, use a
-different secret per device, and never be logged.
+IP inventories, or credentials to Git. Future authentication secrets must come
+from environment variables or protected host-local files, use a different
+secret per device, and never be logged.
 
 ## Planned security design
 
 The next security milestone should add, as one coherent protocol change:
 
-- authenticated panel users with password hashing and secure Flask sessions;
+- authenticated panel users with password hashing and secure sessions;
 - CSRF protection for state-changing browser requests;
 - a static registry of approved devices;
 - a unique key per agent;
@@ -75,7 +78,7 @@ Until a private disclosure channel is established, do not publish exploitable
 household details, addresses, usernames, or credentials in an issue. If misuse
 is suspected:
 
-1. disable the LXC service;
+1. disable the panel service;
 2. disable the `KidPCMonitor` scheduled task on each Windows PC;
 3. block TCP 5000 and 9999 at the relevant firewalls;
 4. preserve logs and the deployed commit hash;
