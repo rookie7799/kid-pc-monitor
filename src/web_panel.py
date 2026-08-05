@@ -144,7 +144,10 @@ def get_time_remaining(ip, port=9999):
     """Get time remaining until next lock"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.7)
+        # GET_TIME_REMAINING triggers a PowerShell user check on the agent
+        # (~0.5-1s), so allow up to 2s. Safe here because _refresh_pc_details
+        # fetches each field in its own thread.
+        s.settimeout(2.0)
         s.connect((ip, port))
         s.send(b"GET_TIME_REMAINING")
         remaining = s.recv(1024).decode().strip()
