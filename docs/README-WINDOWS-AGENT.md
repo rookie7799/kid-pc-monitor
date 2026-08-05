@@ -53,7 +53,7 @@ When prompted, enter the child's local username. Confirm in Task Scheduler that
 `KidPCMonitor` uses that same account and has an at-logon trigger for it.
 
 When the installer offers to open TCP 9999, answer `n`. Its default rule is not
-restricted to the LXC address.
+restricted to the panel server address.
 
 ## 3. Add a source-restricted firewall rule
 
@@ -69,18 +69,18 @@ New-NetFirewallRule `
   -Action Allow `
   -Protocol TCP `
   -LocalPort 9999 `
-  -RemoteAddress <lxc-ip> `
+  -RemoteAddress <server-ip> `
   -Profile Private
 ```
 
-Replace `<lxc-ip>` with the real static/reserved LXC address. Verify:
+Replace `<server-ip>` with the fixed address of the panel server. Verify:
 
 ```powershell
 Get-NetFirewallRule -DisplayName "Kid PC Monitor*" |
   Get-NetFirewallAddressFilter
 ```
 
-The resulting `RemoteAddress` must contain only the LXC address, not `Any`.
+The resulting `RemoteAddress` must contain only the panel server address, not `Any`.
 
 ## 4. Start and inspect the agent
 
@@ -130,7 +130,7 @@ task, or firewall rule if that can be avoided in the local setup.
 
 Also test connectivity from two sources:
 
-- from the LXC, TCP 9999 must connect;
+- from the panel server, TCP 9999 must connect;
 - from another LAN device, TCP 9999 must be refused or time out.
 
 ## Removal

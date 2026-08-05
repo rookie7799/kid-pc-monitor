@@ -28,12 +28,11 @@ DIY parental control system for parents who code. If you know what 'pip install'
 
 ## 🚀 Quick Start
 
-For the homelab deployment path and its security boundaries, read:
+For the deployment path and its security boundaries, read:
 
-- [README-DEPLOY.md](README-DEPLOY.md) — Proxmox LXC web-panel deployment
-- [README-WINDOWS-AGENT.md](README-WINDOWS-AGENT.md) — Windows agent installation and verification
+- [docs/README-DEPLOY.md](docs/README-DEPLOY.md) — Linux web-panel deployment
+- [docs/README-WINDOWS-AGENT.md](docs/README-WINDOWS-AGENT.md) — Windows agent installation and verification
 - [SECURITY.md](SECURITY.md) — current risks and required network controls
-- [ROADMAP.md](ROADMAP.md) — staged improvements after the baseline is proven
 
 ## ⚠️ Technical Skills Required
 
