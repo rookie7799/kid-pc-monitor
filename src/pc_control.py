@@ -404,6 +404,19 @@ class PCTimeControl:
         """Cancel pending shutdown"""
         os.system('shutdown /a')
 
+    def is_unlock_active(self, current_time=None):
+        """Return True while a temporary unlock override is active.
+
+        Clears an expired override so the PC re-locks once the grant runs out.
+        """
+        current_time = current_time or datetime.now()
+        if self.unlock_until and current_time < self.unlock_until:
+            return True
+        if self.unlock_until and current_time >= self.unlock_until:
+            self.unlock_until = None
+            self.save_state()
+        return False
+
     def is_within_allowed_window(self, current_time=None):
         """Return True if current time is inside the allowed usage window.
 
@@ -412,12 +425,8 @@ class PCTimeControl:
         """
         current_time = current_time or datetime.now()
         # Temporary override is active: allow regardless of the window.
-        if self.unlock_until and current_time < self.unlock_until:
+        if self.is_unlock_active(current_time):
             return True
-        # Override expired — clear it and fall through to the window check.
-        if self.unlock_until and current_time >= self.unlock_until:
-            self.unlock_until = None
-            self.save_state()
         now = dtime(current_time.hour, current_time.minute)
         if self.allowed_start <= self.allowed_end:
             return self.allowed_start <= now <= self.allowed_end
@@ -496,6 +505,12 @@ class PCTimeControl:
 
         current_time = current_time or datetime.now()
         self.reset_daily_usage_if_needed(current_time)
+
+        # A temporary unlock override grants access regardless of the daily
+        # limit AND the allowed window. It is a parent-granted extension of
+        # screen time, so it must work even when the daily budget is spent.
+        if self.is_unlock_active(current_time):
+            return False, ""
 
         # Check usage limit
         if self.usage_limit:

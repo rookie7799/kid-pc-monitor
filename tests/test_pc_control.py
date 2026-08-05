@@ -118,14 +118,24 @@ class AllowedWindowTests(unittest.TestCase):
         reached, _ = control.check_time_limits(now)
         self.assertFalse(reached)
 
-    def test_temporary_unlock_does_not_bypass_daily_limit(self):
-        # Even with an active unlock, an exhausted daily limit still locks.
+    def test_temporary_unlock_bypasses_daily_limit(self):
+        # An active unlock is a parent-granted extension of screen time, so it
+        # must work even when the daily budget is spent.
         now = datetime(2026, 7, 30, 23, 0, 0)
         control = make_control(now, usage_limit=120, accrued_seconds=130 * 60)
         control.unlock_until = now + timedelta(minutes=30)
         reached, reason = control.check_time_limits(now)
-        self.assertTrue(reached)
-        self.assertIn("Usage limit", reason)
+        self.assertFalse(reached)
+        self.assertEqual(reason, "")
+
+    def test_temporary_unlock_bypasses_limit_inside_window(self):
+        # Same guarantee inside the allowed window: an exhausted limit is
+        # overridden by the unlock.
+        now = datetime(2026, 7, 30, 12, 0, 0)
+        control = make_control(now, usage_limit=120, accrued_seconds=130 * 60)
+        control.unlock_until = now + timedelta(minutes=30)
+        reached, _ = control.check_time_limits(now)
+        self.assertFalse(reached)
 
     def test_temporary_unlock_expires_and_relocks(self):
         # After unlock_until passes, the window constraint applies again.
@@ -136,6 +146,16 @@ class AllowedWindowTests(unittest.TestCase):
         reached, _ = control.check_time_limits(later)
         self.assertTrue(reached)
         self.assertIsNone(control.unlock_until)  # expired override cleared
+
+    def test_expired_unlock_does_not_bypass_limit(self):
+        # Once the unlock expires, an exhausted limit locks again.
+        now = datetime(2026, 7, 30, 23, 0, 0)
+        control = make_control(now, usage_limit=120, accrued_seconds=130 * 60)
+        control.unlock_until = now + timedelta(minutes=30)
+        later = now + timedelta(minutes=45)
+        reached, reason = control.check_time_limits(later)
+        self.assertTrue(reached)
+        self.assertIn("Usage limit", reason)
 
 
 class DataDirectoryTests(unittest.TestCase):
