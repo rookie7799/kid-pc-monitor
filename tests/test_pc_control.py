@@ -70,6 +70,44 @@ class TimeLimitTests(unittest.TestCase):
         self.assertFalse(reached)
         self.assertEqual(reason, "")
 
+    def test_load_state_resets_accrued_usage_across_date_boundary(self):
+        # Regression: accrued usage must NOT survive a reboot into the next day.
+        # When load_state sees a start_time from yesterday, it resets start_time
+        # to today AND must zero accrued_seconds — otherwise yesterday's exhausted
+        # limit "sticks" to the new day and the PC shows 0 minutes remaining right
+        # after boot (the bug that shipped 2026-08).
+        import json as _json
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "pc_control_state.json"
+            state_file.write_text(_json.dumps({
+                "usage_limit": 360,
+                "accrued_seconds": 21600.0,   # yesterday's full 360 min
+                "allowed_start": "07:00",
+                "allowed_end": "22:00",
+                "unlock_until": None,
+                "start_time": "2026-07-29T20:00:00.000000",
+                "current_user": "Kids",
+            }))
+
+            control = pc_control.PCTimeControl.__new__(pc_control.PCTimeControl)
+            control.usage_limit = None
+            control.accrued_seconds = 0.0
+            control.start_time = datetime(2026, 7, 29, 20, 0, 0)
+            control.allowed_start = pc_control.dtime(7, 0)
+            control.allowed_end = pc_control.dtime(22, 0)
+            control.unlock_until = None
+            control.current_user = "Kids"
+            control.state_file = state_file
+            control.warnings_sent = set()
+            control.logger = Mock()
+            control.load_state()
+
+            # start_time reset to today, and accrued usage must be zeroed too.
+            self.assertEqual(control.accrued_seconds, 0.0)
+            self.assertEqual(control.start_time.date(), datetime.now().date())
+
 
 class AllowedWindowTests(unittest.TestCase):
     def test_within_default_window_is_allowed(self):

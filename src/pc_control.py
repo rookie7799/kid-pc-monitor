@@ -210,9 +210,13 @@ class PCTimeControl:
 
                     # A usage limit is daily. Never carry elapsed time across
                     # a date boundary (also recover safely from a future date
-                    # caused by a clock correction).
+                    # caused by a clock correction). Both the start_time AND the
+                    # accrued usage must reset — otherwise yesterday's exhausted
+                    # limit "sticks" to the new day and the PC shows 0 minutes
+                    # remaining right after boot (bug fixed 2026-08).
                     if saved_date != current_date:
                         self.start_time = datetime.now()
+                        self.accrued_seconds = 0.0
                         self.logger.info(f"Start time was from {saved_date}, reset to today")
                         print(f"[{datetime.now():%H:%M:%S}] Usage timer reset for new day")
                     else:
