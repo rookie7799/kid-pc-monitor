@@ -334,6 +334,12 @@ def action():
     else:
         success, response = False, "Unknown action"
 
+    # Any state-changing action invalidates the per-PC cache so the next
+    # page render reflects the new value instead of the stale cached one.
+    if success and ip:
+        with _cache_lock:
+            status_cache.pop(ip, None)
+
     return jsonify({'success': success, 'response': response})
 
 # HTML Templates
