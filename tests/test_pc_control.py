@@ -22,6 +22,7 @@ def make_control(start_time, usage_limit=120, current_user="Child", accrued_seco
     control.allowed_start = allowed_start or pc_control.dtime(7, 0)
     control.allowed_end = allowed_end or pc_control.dtime(22, 0)
     control.unlock_until = None
+    control.is_locked = False
     control.logger = Mock()
     control.save_state = Mock()
     return control
@@ -194,6 +195,32 @@ class AllowedWindowTests(unittest.TestCase):
         reached, reason = control.check_time_limits(later)
         self.assertTrue(reached)
         self.assertIn("Usage limit", reason)
+
+    def test_active_unlock_does_not_accrue_usage(self):
+        # Time spent under a temporary unlock is FREE bonus screen time and
+        # must not consume the daily limit. _should_accrue_time() must be False.
+        now = datetime(2026, 7, 30, 23, 0, 0)
+        control = make_control(now, usage_limit=120)
+        control.unlock_until = now + timedelta(minutes=30)
+        control.is_locked = False
+
+        self.assertFalse(control._should_accrue_time(now))
+
+    def test_unlock_expired_resumes_accrual(self):
+        # After the unlock expires, normal active usage accrues again.
+        now = datetime(2026, 7, 30, 23, 0, 0)
+        control = make_control(now, usage_limit=120)
+        control.unlock_until = now + timedelta(minutes=30)
+        later = now + timedelta(minutes=45)
+        control.is_locked = False
+
+        self.assertTrue(control._should_accrue_time(later))
+
+    def test_locked_pc_does_not_accrue(self):
+        now = datetime(2026, 7, 30, 23, 0, 0)
+        control = make_control(now, usage_limit=120)
+        control.is_locked = True
+        self.assertFalse(control._should_accrue_time(now))
 
 
 class DataDirectoryTests(unittest.TestCase):

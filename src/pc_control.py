@@ -300,12 +300,14 @@ class PCTimeControl:
                 self.is_locked = True
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] PC has been locked (detected)")
 
-            # Accrue active usage only while the PC is unlocked AND the console
-            # user is monitored. A lock (or an exempt parent) pauses the timer.
+            # Accrue active usage only while the PC is unlocked, the console
+            # user is monitored, AND no temporary unlock is active (unlock
+            # time is free bonus screen time, not part of the daily budget).
+            # A lock (or an exempt parent) pauses the timer too.
             now = time.monotonic()
             delta = now - last
             last = now
-            if not self.is_locked and self.should_monitor_user():
+            if self._should_accrue_time():
                 self.reset_daily_usage_if_needed()
                 if self.usage_limit:
                     self.accrued_seconds += delta
@@ -447,6 +449,18 @@ class PCTimeControl:
         self.save_state()
         self.logger.info("Temporary unlock granted until %s", self.unlock_until)
         return self.unlock_until
+
+    def _should_accrue_time(self, current_time=None):
+        """Whether active (unlocked) usage time should accrue right now.
+
+        Accrual is paused while a temporary unlock is active: a parent-granted
+        unlock is FREE bonus screen time and must NOT consume the daily limit.
+        Otherwise the "Time Remaining" counter drains in step with the unlock
+        timer (bug fixed 2026-08).
+        """
+        if self.is_locked or self.is_unlock_active(current_time):
+            return False
+        return self.should_monitor_user()
 
     def set_allowed_window(self, start, end):
         """Set the allowed usage window (start/end as datetime.time)."""
