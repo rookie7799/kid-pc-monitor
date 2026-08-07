@@ -17,6 +17,74 @@ CUSTOM_PC_NAMES = {
     # Example: '192.168.1.112': 'Sarah\'s Desktop',
 }
 
+# Per-PC status cache with TTL to avoid a TCP round-trip on every page render.
+# Cached values (status, current_user, usage_limit, time_remaining,
+# allowed_window, unlock_status) are refreshed only after STATUS_CACHE_TTL
+# seconds, or on-demand by /scan. A PC that stops answering within the TTL
+# shows stale-but-fast data until the next refresh.
+STATUS_CACHE_TTL = 10.0
+status_cache = {}  # ip -> { 'values': {...}, 'ts': monotonic_ts }
+_cache_lock = threading.Lock()
+
+def _cache_get(ip):
+    entry = status_cache.get(ip)
+    if entry and (time.monotonic() - entry['ts']) < STATUS_CACHE_TTL:
+        return entry['values']
+    return None
+
+def _cache_set(ip, values):
+    with _cache_lock:
+        status_cache[ip] = {'values': values, 'ts': time.monotonic()}
+
+def _refresh_pc_details(ip, port=9999):
+    """Fetch all per-PC details in parallel and store them in the cache.
+
+    Returns the cached values dict. Each field is fetched independently and
+    missing/errored fields fall back to the previous cached value (or None).
+    """
+    results = {}
+
+    def fetch(key, fn):
+        try:
+            results[key] = fn(ip, port)
+        except Exception:
+            results[key] = None
+
+    threads = [
+        threading.Thread(target=fetch, args=('status', check_pc_status)),
+        threading.Thread(target=fetch, args=('current_user', get_current_user)),
+        threading.Thread(target=fetch, args=('usage_limit', get_usage_limit)),
+        threading.Thread(target=fetch, args=('time_remaining', get_time_remaining)),
+        threading.Thread(target=fetch, args=('allowed_window', get_allowed_window)),
+        threading.Thread(target=fetch, args=('unlock_status', get_unlock_status)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Merge onto the previous cached values so transient errors never blank a PC.
+    prev = status_cache.get(ip, {}).get('values', {}) if ip in status_cache else {}
+    merged = dict(prev)
+    for k, v in results.items():
+        if v is not None:
+            merged[k] = v
+    _cache_set(ip, merged)
+    return merged
+
+def _pc_details(ip, port=9999):
+    """Return per-PC details, refreshing the cache only if stale/absent."""
+    cached = _cache_get(ip)
+    if cached is not None:
+        return cached
+    # Guard against stampede: only one thread refreshes, others reuse whatever
+    # becomes available.
+    with _cache_lock:
+        if (ip in status_cache
+                and (time.monotonic() - status_cache[ip]['ts']) < STATUS_CACHE_TTL):
+            return status_cache[ip]['values']
+    return _refresh_pc_details(ip, port)
+
 def get_local_ip():
     """Get the local IP address of this machine"""
     try:
@@ -33,7 +101,7 @@ def check_pc_status(ip, port=9999):
     try:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Checking status of {ip}")
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
+        s.settimeout(0.7)
         s.connect((ip, port))
         s.send(b"GET_STATUS")
         status = s.recv(1024).decode().strip()
@@ -48,7 +116,7 @@ def get_current_user(ip, port=9999):
     """Get the current username logged in on the kid PC (as reported by the agent)."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
+        s.settimeout(0.7)
         s.connect((ip, port))
         s.send(b"GET_CURRENT_USER")
         username = s.recv(1024).decode().strip()
@@ -62,7 +130,7 @@ def get_usage_limit(ip, port=9999):
     """Get the current usage limit in minutes"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
+        s.settimeout(0.7)
         s.connect((ip, port))
         s.send(b"GET_USAGE_LIMIT")
         limit = s.recv(1024).decode().strip()
@@ -72,25 +140,14 @@ def get_usage_limit(ip, port=9999):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting limit from {ip}: {e}")
         return None
 
-def get_lock_times(ip, port=9999):
-    """Get scheduled lock times"""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
-        s.connect((ip, port))
-        s.send(b"GET_LOCK_TIMES")
-        times = s.recv(1024).decode().strip()
-        s.close()
-        return None if times == "None" else times.split(',')
-    except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting lock times from {ip}: {e}")
-        return None
-
 def get_time_remaining(ip, port=9999):
     """Get time remaining until next lock"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
+        # GET_TIME_REMAINING triggers a PowerShell user check on the agent
+        # (~0.5-1s), so allow up to 2s. Safe here because _refresh_pc_details
+        # fetches each field in its own thread.
+        s.settimeout(2.0)
         s.connect((ip, port))
         s.send(b"GET_TIME_REMAINING")
         remaining = s.recv(1024).decode().strip()
@@ -98,6 +155,34 @@ def get_time_remaining(ip, port=9999):
         return remaining
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting time remaining from {ip}: {e}")
+        return None
+
+def get_allowed_window(ip, port=9999):
+    """Get the allowed usage window (e.g. '07:00-22:00')"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.7)
+        s.connect((ip, port))
+        s.send(b"GET_ALLOWED_WINDOW")
+        window = s.recv(1024).decode().strip()
+        s.close()
+        return window
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting allowed window from {ip}: {e}")
+        return None
+
+def get_unlock_status(ip, port=9999):
+    """Get active temporary-unlock status (e.g. 'ACTIVE 25 minutes' or 'INACTIVE')"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.7)
+        s.connect((ip, port))
+        s.send(b"GET_UNLOCK_STATUS")
+        status = s.recv(1024).decode().strip()
+        s.close()
+        return status
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting unlock status from {ip}: {e}")
         return None
 
 def scan_for_servers(port=9999):
@@ -141,6 +226,9 @@ def scan_for_servers(port=9999):
                     'locked': False,  # Will update in separate check
                     'last_seen': datetime.now()
                 }
+                # A fresh scan may reveal new state; drop this PC's stale cache.
+                with _cache_lock:
+                    status_cache.pop(str(ip), None)
         except:
             pass
     
@@ -172,15 +260,15 @@ def send_command(host, command, port=9999):
 @app.route('/')
 def index():
     """Main page showing all discovered PCs"""
-    # Update lock status and current user for all PCs
+    # Pull per-PC details from the TTL cache (refreshed in parallel only when
+    # stale) instead of blocking on a fresh TCP round-trip per field per load.
     for ip in discovered_pcs:
-        status = check_pc_status(ip)
-        discovered_pcs[ip]['locked'] = (status == "LOCKED")
-
-        # Get current user
-        username = get_current_user(ip)
-        if username:
-            discovered_pcs[ip]['current_user'] = username
+        details = _pc_details(ip)
+        discovered_pcs[ip]['locked'] = (details.get('status') == "LOCKED")
+        if details.get('current_user'):
+            discovered_pcs[ip]['current_user'] = details['current_user']
+        discovered_pcs[ip]['usage_limit'] = details.get('usage_limit')
+        discovered_pcs[ip]['time_remaining'] = details.get('time_remaining')
 
     return render_template('index.html',
                          pcs=discovered_pcs,
@@ -196,24 +284,16 @@ def scan():
 def control(ip):
     """Control page for a specific PC"""
     pc_info = discovered_pcs.get(ip, {'hostname': 'Unknown', 'status': 'unknown'})
-    # Check current lock status
-    status = check_pc_status(ip)
-    pc_info['locked'] = (status == "LOCKED")
-
-    # Get current user
-    username = get_current_user(ip)
-    if username:
-        pc_info['current_user'] = username
-
-    # Get current limits and time remaining (always update, even if None)
-    usage_limit = get_usage_limit(ip)
-    pc_info['usage_limit'] = usage_limit  # Update even if None to clear old values
-
-    lock_times = get_lock_times(ip)
-    pc_info['lock_times'] = lock_times  # Update even if None to clear old values
-
-    time_remaining = get_time_remaining(ip)
-    pc_info['time_remaining'] = time_remaining  # Update even if None
+    # Fetch all per-PC details via the TTL cache (parallel refresh when stale).
+    details = _pc_details(ip)
+    pc_info['locked'] = (details.get('status') == "LOCKED")
+    if details.get('current_user'):
+        pc_info['current_user'] = details['current_user']
+    # Update even if None to clear old values.
+    pc_info['usage_limit'] = details.get('usage_limit')
+    pc_info['time_remaining'] = details.get('time_remaining')
+    pc_info['allowed_window'] = details.get('allowed_window')
+    pc_info['unlock_status'] = details.get('unlock_status')
 
     return render_template('control.html', ip=ip, pc_info=pc_info)
 
@@ -239,17 +319,26 @@ def action():
     elif action_type == 'set_limit':
         minutes = data.get('minutes', 120)
         success, response = send_command(ip, f"SET_LIMIT:{minutes}")
-    elif action_type == 'add_lock_time':
-        lock_time = data.get('time', '21:00')
-        success, response = send_command(ip, f"ADD_LOCK_TIME:{lock_time}")
+    elif action_type == 'set_allowed_window':
+        window = data.get('window', '07:00-22:00')
+        success, response = send_command(ip, f"SET_ALLOWED_WINDOW:{window}")
+    elif action_type == 'unlock':
+        minutes = data.get('minutes', 30)
+        success, response = send_command(ip, f"UNLOCK:{minutes}")
+    elif action_type == 'cancel_unlock':
+        success, response = send_command(ip, "CANCEL_UNLOCK")
     elif action_type == 'clear_usage_limit':
         success, response = send_command(ip, "CLEAR_USAGE_LIMIT")
-    elif action_type == 'clear_lock_times':
-        success, response = send_command(ip, "CLEAR_LOCK_TIMES")
     elif action_type == 'clear_all':
         success, response = send_command(ip, "CLEAR_ALL")
     else:
         success, response = False, "Unknown action"
+
+    # Any state-changing action invalidates the per-PC cache so the next
+    # page render reflects the new value instead of the stale cached one.
+    if success and ip:
+        with _cache_lock:
+            status_cache.pop(ip, None)
 
     return jsonify({'success': success, 'response': response})
 
@@ -313,6 +402,17 @@ INDEX_TEMPLATE = '''
             color: #666;
             font-size: 14px;
         }
+        .pc-limit {
+            color: #9c27b0;
+            font-size: 14px;
+            margin-top: 4px;
+        }
+        .pc-remaining {
+            color: #2196F3;
+            font-size: 14px;
+            font-weight: bold;
+            margin-top: 4px;
+        }
         .status {
             display: inline-block;
             padding: 5px 10px;
@@ -358,6 +458,12 @@ INDEX_TEMPLATE = '''
                 <div class="pc-ip">{{ ip }}</div>
                 {% if info.get('current_user') %}
                 <div class="pc-ip">👤 User: {{ info.current_user }}</div>
+                {% endif %}
+                {% if info.get('usage_limit') %}
+                <div class="pc-limit">⏱️ Limit: {{ info.usage_limit }} min ({{ (info.usage_limit / 60)|round(1) }}h)</div>
+                {% endif %}
+                {% if info.get('time_remaining') and info.get('time_remaining') != 'No limits set' %}
+                <div class="pc-remaining">⏳ Remaining: {{ info.time_remaining }}</div>
                 {% endif %}
                 {% if info.locked %}
                 <span class="status locked">🔒 LOCKED</span>
@@ -533,18 +639,24 @@ CONTROL_TEMPLATE = '''
             <p>⏳ <strong>Time Remaining:</strong> {{ pc_info.time_remaining }}</p>
             {% endif %}
 
-            <!-- Scheduled Locks -->
-            <p>🕐 <strong>Scheduled Locks:</strong>
-            {% if pc_info.get('lock_times') %}
-                {{ pc_info.lock_times|join(', ') }}
-                <button onclick="clearLimit('locks')" style="margin-left: 10px; padding: 5px 10px; background-color: #f44336; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">❌ Clear</button>
+            <!-- Allowed Window -->
+            <p>🕒 <strong>Allowed Window:</strong>
+            {% if pc_info.get('allowed_window') %}
+                {{ pc_info.allowed_window }}
             {% else %}
-                <span style="color: #999;">Not set</span>
+                <span style="color: #999;">07:00-22:00</span>
             {% endif %}
             </p>
 
+            <!-- Temporary Unlock Status -->
+            {% if pc_info.get('unlock_status') and pc_info.get('unlock_status').startswith('ACTIVE') %}
+            <p>🔓 <strong>Temporary Unlock:</strong> <span style="color: #4CAF50; font-weight: bold;">{{ pc_info.unlock_status }}</span>
+                <button onclick="cancelUnlock()" style="margin-left: 10px; padding: 5px 10px; background-color: #f44336; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">❌ Cancel</button>
+            </p>
+            {% endif %}
+
             <!-- Clear All Button -->
-            {% if pc_info.get('usage_limit') or pc_info.get('lock_times') %}
+            {% if pc_info.get('usage_limit') %}
             <button onclick="clearLimit('all')" style="width: 100%; margin-top: 10px; padding: 10px; background-color: #ff5722; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px;">🗑️ Clear All Limits</button>
             {% endif %}
         </div>
@@ -562,6 +674,12 @@ CONTROL_TEMPLATE = '''
             <button class="btn btn-lock" onclick="performAction('lock')">
                 Lock Computer Now
             </button>
+            <div style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
+                <input type="number" id="unlock-minutes" value="30" min="5" max="240" style="flex: 1;" title="Unlock duration in minutes">
+                <button class="btn btn-lock" onclick="performUnlock()" style="flex: 1; background-color: #4CAF50;">
+                    🔓 Unlock
+                </button>
+            </div>
             <button class="btn btn-shutdown" onclick="confirmAndPerform('shutdown')">
                 Shutdown Computer
             </button>
@@ -591,10 +709,15 @@ CONTROL_TEMPLATE = '''
         </div>
         
         <div class="action-group">
-            <div class="action-title">🕐 Set Lock Time</div>
-            <input type="time" id="lock-time" value="21:00">
-            <button class="btn btn-limit" onclick="setLockTime()">
-                Set Bedtime Lock
+            <div class="action-title">🕒 Set Allowed Window</div>
+            <div style="color: #666; font-size: 14px; margin-bottom: 5px;">Allowed usage hours (PC locks outside this window):</div>
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <input type="time" id="allowed-start" value="07:00" style="flex: 1;">
+                <span>to</span>
+                <input type="time" id="allowed-end" value="22:00" style="flex: 1;">
+            </div>
+            <button class="btn btn-limit" onclick="setAllowedWindow()">
+                Set Allowed Window
             </button>
         </div>
     </div>
@@ -695,10 +818,63 @@ CONTROL_TEMPLATE = '''
             });
         }
         
-        function setLockTime() {
-            const time = document.getElementById('lock-time').value;
-            if (!time) {
-                showStatus('Please select a time', false);
+        function performUnlock() {
+            const minutes = document.getElementById('unlock-minutes').value;
+            if (!minutes || parseInt(minutes) < 1) {
+                showStatus('Please enter a valid unlock duration (minutes)', false);
+                return;
+            }
+            if (!confirm(`Grant temporary unlock for ${minutes} minutes? (Daily limit still applies)`)) {
+                return;
+            }
+            fetch('/action', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    ip: '{{ ip }}',
+                    action: 'unlock',
+                    minutes: parseInt(minutes)
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                showStatus(data.response, data.success);
+                if (data.success) {
+                    setTimeout(() => {
+                        location.reload();
+                    }, 1000);
+                }
+            });
+        }
+
+        function cancelUnlock() {
+            if (!confirm('Cancel the current temporary unlock?')) {
+                return;
+            }
+            fetch('/action', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    ip: '{{ ip }}',
+                    action: 'cancel_unlock'
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                showStatus(data.response, data.success);
+                if (data.success) {
+                    setTimeout(() => {
+                        location.reload();
+                    }, 1000);
+                }
+            });
+        }
+        
+        function setAllowedWindow() {
+            const start = document.getElementById('allowed-start').value;
+            const end = document.getElementById('allowed-end').value;
+            if (!start || !end) {
+                showStatus('Please select both start and end times', false);
                 return;
             }
 
@@ -707,8 +883,8 @@ CONTROL_TEMPLATE = '''
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                     ip: '{{ ip }}',
-                    action: 'add_lock_time',
-                    time: time
+                    action: 'set_allowed_window',
+                    window: start + '-' + end
                 })
             })
             .then(response => response.json())
@@ -729,11 +905,8 @@ CONTROL_TEMPLATE = '''
             if (type === 'usage') {
                 confirmMsg = 'Clear the daily usage limit?';
                 action = 'clear_usage_limit';
-            } else if (type === 'locks') {
-                confirmMsg = 'Clear all scheduled lock times?';
-                action = 'clear_lock_times';
             } else if (type === 'all') {
-                confirmMsg = 'Clear ALL limits and scheduled locks?';
+                confirmMsg = 'Clear ALL limits?';
                 action = 'clear_all';
             }
 
