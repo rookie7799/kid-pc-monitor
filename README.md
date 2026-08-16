@@ -380,21 +380,21 @@ To contribute:
 
 ### Recent Changes (v2.0)
 
-- ✅ Time warnings (15, 5, 1 minute before lock)
-- ✅ Settings save after restart
-- ✅ Control specific user accounts
-- ✅ Fixed time calculation
-- ✅ Better error messages
-- ✅ Show time left in control panel
-- ✅ Better system use
+-  Time warnings (15, 5, 1 minute before lock)
+-  Settings save after restart
+-  Control specific user accounts
+-  Fixed time calculation
+-  Better error messages
+-  Show time left in control panel
+-  Better system use
 
 ### Recent Changes (v2.1)
 
-- ✅ Full Linux agent support (Arch, Ubuntu, Fedora)
-- ✅ Linux screen locking (i3lock, GNOME, KDE, Xfce)
-- ✅ Desktop notifications on Linux
-- ✅ systemd service management
-- ✅ Same web control panel for Windows and Linux
+-  Full Linux agent support (Arch, Ubuntu, Fedora)
+-  Linux screen locking (i3lock, GNOME, KDE, Xfce)
+-  Desktop notifications on Linux
+-  systemd service management
+-  Same web control panel for Windows and Linux
 
 ### Future Ideas
 
