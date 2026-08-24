@@ -621,7 +621,12 @@ if __name__ == "__main__":
             "Server Error"
         )
         sys.exit(1)
-    
+
+    # Start the enforcement monitor only once the server is confirmed up, so a
+    # failed startup can't lock the screen on its way to sys.exit(1).
+    monitor_thread = threading.Thread(target=control.run_monitor, daemon=True)
+    monitor_thread.start()
+
     print("Server is running. Press Ctrl+C to stop.")
     
     try:
