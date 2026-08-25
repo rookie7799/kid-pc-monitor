@@ -322,18 +322,30 @@ class PCTimeControl:
         return False, ""
 
     def run_monitor(self):
-        """Main monitoring loop"""
+        """Main monitoring loop: enforces limits for the whole session.
+
+        Runs forever — it must NOT exit after the first lock, otherwise the kid
+        could unlock the screen and use the PC unrestricted for the rest of the
+        day. Locking only happens on the unlocked->over-limit transition so we
+        don't re-issue LockWorkStation every second while already at the lock
+        screen; monitor_activity clears is_locked when the screen is unlocked,
+        which re-arms enforcement if the limit is still exceeded.
+        """
         print("PC Time Control is running...")
         while True:
-            # Check and send warnings if approaching time limit
-            self.check_and_send_warnings()
+            try:
+                # Check and send warnings if approaching time limit
+                self.check_and_send_warnings()
 
-            # Check if time limit reached
-            should_lock, reason = self.check_time_limits()
-            if should_lock:
-                print(f"Locking PC: {reason}")
-                self.lock_pc()
-                break
+                # Check if time limit reached
+                should_lock, reason = self.check_time_limits()
+                if should_lock and not self.is_locked:
+                    print(f"Locking PC: {reason}")
+                    self.lock_pc()
+            except Exception as e:
+                # Never let a transient error kill the enforcement loop.
+                self.logger.error(f"Error in monitor loop: {e}")
+                print(f"[{datetime.now():%H:%M:%S}] Monitor loop error: {e}")
             time.sleep(1)
 
 # Simple Remote Control Server
