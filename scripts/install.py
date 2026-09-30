@@ -8,6 +8,16 @@ from pathlib import Path
 AGENT_PORT = 9999
 FIREWALL_RULE_NAME = "Kid PC Monitor (agent)"
 
+# The installer prints status emoji. On a console whose active code page is not
+# UTF-8 (cp1252/cp866, or a non-interactive SSH session on English Windows),
+# printing them raises UnicodeEncodeError and aborts the install mid-way. Force
+# UTF-8 so the messages never crash the setup.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8')
+    except (AttributeError, ValueError):
+        pass
+
 
 def quote_windows_argument(value):
     """Quote one command-line argument using Windows parsing rules."""
