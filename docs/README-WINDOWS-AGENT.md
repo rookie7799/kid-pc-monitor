@@ -69,11 +69,14 @@ New-NetFirewallRule `
   -Action Allow `
   -Protocol TCP `
   -LocalPort 9999 `
-  -RemoteAddress <server-ip> `
+  -RemoteAddress 192.168.0.0/24 `
   -Profile Private
 ```
 
-Replace `<server-ip>` with the fixed address of the panel server. Verify:
+Scope the rule to the LAN **subnet**, not a single host address. If the panel
+LXC is renumbered, a host-scoped rule keeps blocking the panel while the agent
+itself still looks healthy — a silent, hard-to-diagnose failure. Replace
+`192.168.0.0/24` with your own LAN prefix. Verify:
 
 ```powershell
 Get-NetFirewallRule -DisplayName "Kid PC Monitor*" |
