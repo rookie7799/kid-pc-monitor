@@ -306,6 +306,22 @@ Parents and developers welcome! Please:
 2. Create a feature branch
 3. Submit a pull request
 
+### Running the tests
+
+The platform-independent logic has unit tests under `tests/`. They use only the Python standard library — no extra dependencies and no Windows required:
+
+```bash
+# From the repo root
+python tests/test_warning_logic.py
+```
+
+Each test file is runnable on its own and prints a line per case (and exits non-zero on failure). If you prefer, you can also run them with pytest:
+
+```bash
+pip install pytest   # optional
+pytest tests/
+```
+
 ### Recent Improvements (v2.0)
 - ✅ Grace period warnings (15, 5, 1 minute before lock)
 - ✅ Persistent state storage (settings survive restarts)
