@@ -15,7 +15,7 @@ DIY parental control system for parents who code. If you know what 'pip install'
 - **⏱️ Daily usage limits** - Set maximum screen time
 - **💬 Send messages** - Display warnings or reminders
 - **🏠 Auto-discovery** - Finds all PCs on your network
-- **⏰ Grace period warnings** - 15, 5, and 1-minute warnings before locks
+- **⏰ Grace period warnings** - 15, 5, and 1-minute warnings before locks (logging in with less than 15 minutes left shows the exact time remaining)
 - **💾 Persistent settings** - Limits survive PC restarts
 - **👤 User-specific restrictions** - Monitor only specific Windows accounts
 - **📊 Real-time status** - See current limits and time remaining
@@ -34,7 +34,7 @@ This is NOT a one-click solution. You'll need to:
 - Install Python
 - Use a terminal / command prompt
 - Understand IP addresses
-- Open firewall ports where needed (Windows on kid PCs; on Linux parents, e.g. `ufw` or your distro's firewall)
+- Open firewall ports where needed (the kid-PC installer offers to add the Windows rule for you; on Linux parents, e.g. `ufw` or your distro's firewall)
 - On kid PCs: set up a Windows scheduled task (the installer does this)
 
 If these terms scare you, consider commercial alternatives like:
@@ -174,7 +174,7 @@ Both services run invisibly in the background using `pythonw.exe`.
 
 ---
 
-*Side note: if your kid is "good" with computers, consider copying the scripts somewhere less obvious.*
+*Side note: if your kid is "good" with computers, consider copying the scripts somewhere less obvious. Copy the whole `src` folder, not just `pc_control.py`: the agent also needs `warning_logic.py` next to it. Then re-run `scripts/install.py` and enter the new path when asked.*
 
 ## 📖 Usage Guide
 
@@ -192,6 +192,11 @@ Both services run invisibly in the background using `pythonw.exe`.
 3. Choose bedtime (e.g., 9:00 PM)
 4. PC will lock automatically at that time
 5. See the scheduled lock in "Current Settings"
+
+> **Note:** a bedtime lock is enforced during its scheduled minute only: if the
+> kid unlocks during that minute the PC locks again, but unlocking later is
+> not blocked. To keep the PC locked for the rest of the evening, also set a
+> usage limit that runs out at bedtime.
 
 ### Clearing/Removing Limits
 1. View the "📊 Current Settings" section
@@ -277,7 +282,7 @@ nothing shows up, see the task-troubleshooting note below.
 ### "Lock status not updating"
 - Restart pc_control.py
 - Check if LogonUI.exe detection works
-- See logs in console window
+- Check `pc_control.log` and `pc_control.out.log` in the `src` folder (the agent runs without a console window)
 
 ### "Task installed but the agent never runs (port 9999 not listening; clicking Run does nothing)"
 - Almost always the **wrong user account**: the scheduled task was created for
@@ -330,6 +335,13 @@ pytest tests/
 - ✅ Improved error handling and logging
 - ✅ Web UI shows current limits and time remaining
 - ✅ Better resource management
+
+### Recent Fixes
+- ✅ Time limits and bedtime locks are actually enforced again (the enforcement loop was never started)
+- ✅ Enforcement continues after the first lock, so unlocking doesn't give unlimited time
+- ✅ Bedtime locks no longer get skipped, and enforcement no longer stops on the last day of a month
+- ✅ Warnings show the real time left (a 10-minute limit no longer says "15 minutes")
+- ✅ Installer creates the task for the kid's account and opens the firewall port
 
 ### Ideas for Future Contributions
 - Linux/macOS **agent** (kid-side monitoring; the web panel already runs on Linux/macOS/Windows)
