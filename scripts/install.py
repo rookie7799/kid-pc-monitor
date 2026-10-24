@@ -8,6 +8,26 @@ from pathlib import Path
 AGENT_PORT = 9999
 FIREWALL_RULE_NAME = "Kid PC Monitor (agent)"
 
+# The installer prints status emoji. On a console whose active code page is not
+# UTF-8 (cp1252/cp866, or a non-interactive SSH session on English Windows),
+# printing them raises UnicodeEncodeError and aborts the install mid-way. Force
+# UTF-8 so the messages never crash the setup.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8')
+    except (AttributeError, ValueError):
+        pass
+
+
+def quote_windows_argument(value):
+    """Quote one command-line argument using Windows parsing rules."""
+    return subprocess.list2cmdline([str(value)])
+
+
+def quote_powershell_literal(value):
+    """Return a single-quoted PowerShell literal."""
+    return "'" + str(value).replace("'", "''") + "'"
+
 def find_pc_control():
     """Locate pc_control.py relative to this installer.
 
@@ -70,6 +90,8 @@ def get_target_user():
 def create_task_with_power_settings(script_path, target_user):
     """Create scheduled task that runs even on battery power"""
     pythonw_path = str(Path(sys.executable).parent / 'pythonw.exe')
+    working_directory = os.path.dirname(script_path)
+    script_argument = quote_windows_argument(script_path)
     task_name = "KidPCMonitor"
 
     # Show what we're about to do
@@ -89,7 +111,10 @@ def create_task_with_power_settings(script_path, target_user):
     $ErrorActionPreference = 'Stop'
     try {{
         # Create the action
-        $action = New-ScheduledTaskAction -Execute "{pythonw_path}" -Argument "{script_path}" -WorkingDirectory "{os.path.dirname(script_path)}"
+        $action = New-ScheduledTaskAction `
+            -Execute {quote_powershell_literal(pythonw_path)} `
+            -Argument {quote_powershell_literal(script_argument)} `
+            -WorkingDirectory {quote_powershell_literal(working_directory)}
 
         # Trigger when the monitored user logs on (scoped to that account so it
         # fires for the kid's session, not the admin's). An AtStartup trigger is
