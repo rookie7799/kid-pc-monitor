@@ -247,6 +247,8 @@ Settings are automatically saved to `pc_control_state.json` including:
 - Scheduled lock times
 - Accrued active usage for the current day (`accrued_seconds`), saved every
   30 s of usage so an unclean shutdown loses at most that much
+- The allowed-hours window (`allowed_start`/`allowed_end`, absent = off)
+- A running temporary unlock (`unlock_until`)
 - Start time for usage tracking
 
 The daily limit is a budget of **active, unlocked** time. Time spent at the
@@ -254,6 +256,33 @@ lock screen, signed in as an exempt parent, with the PC asleep, or before
 midnight does not consume it, and the counter starts fresh each calendar day.
 
 This means restrictions **survive PC restarts** - kids can't bypass by rebooting!
+
+### Allowed Hours Window (opt-in)
+A parent can set the hours a PC may be used, from the panel (`Set Allowed
+Window`) or with `SET_ALLOWED_WINDOW:07:00-21:30`. Outside that window the
+agent locks the PC and re-locks it if it is unlocked again. A window that ends
+before it starts crosses midnight, e.g. `22:00-07:00`.
+
+**The window is off by default.** No window set means the PC is usable at any
+hour and only the daily limit and scheduled lock times apply, which is also how
+an existing installation behaves after upgrading. `CLEAR_ALLOWED_WINDOW` (or
+`Turn off` in the panel) removes it again. Scheduled lock times keep working
+next to the window.
+
+### Bonus Time (temporary unlock)
+`UNLOCK:30` (or the `Unlock` button) lets the PC be used for 30 minutes
+regardless of the window and of an exhausted daily limit - an explicit parent
+decision such as "finish your homework". Bonus time is **not** charged to the
+daily budget, expires on its own, is not restored by a restart, and
+`CANCEL_UNLOCK` revokes it. A scheduled lock time still fires during it:
+bedtime is not a budget.
+
+### Locking method
+`LOCK_METHOD = 'lock'` (default) uses `LockWorkStation()`, which locks the
+session the agent runs in - the setup the installer creates. If you deploy the
+agent as SYSTEM / Session 0 instead, `LockWorkStation()` locks the wrong
+session, so set `LOCK_METHOD = 'logoff'` to sign the console session off. That
+closes open programs, hence opt-in.
 
 
 ## 🔧 Troubleshooting

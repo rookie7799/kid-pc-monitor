@@ -20,9 +20,10 @@ CUSTOM_PC_NAMES = {
 
 # Per-PC status cache with TTL to avoid a TCP round-trip on every page render.
 # Cached values (status, current_user, usage_limit, time_remaining,
-# lock_times) are refreshed only after STATUS_CACHE_TTL seconds, or on-demand
-# by /scan and after a state-changing /action. A PC that stops answering within
-# the TTL shows stale-but-fast data until the next refresh.
+# lock_times, allowed_window, unlock_status) are refreshed only after
+# STATUS_CACHE_TTL seconds, or on-demand by /scan and after a state-changing
+# /action. A PC that stops answering within the TTL shows stale-but-fast data
+# until the next refresh.
 STATUS_CACHE_TTL = 10.0
 status_cache = {}  # ip -> { 'values': {...}, 'ts': monotonic_ts }
 _cache_lock = threading.Lock()
@@ -57,6 +58,8 @@ def _refresh_pc_details(ip, port=9999):
         threading.Thread(target=fetch, args=('usage_limit', get_usage_limit)),
         threading.Thread(target=fetch, args=('time_remaining', get_time_remaining)),
         threading.Thread(target=fetch, args=('lock_times', get_lock_times)),
+        threading.Thread(target=fetch, args=('allowed_window', get_allowed_window)),
+        threading.Thread(target=fetch, args=('unlock_status', get_unlock_status)),
     ]
     for t in threads:
         t.start()
@@ -171,6 +174,34 @@ def get_time_remaining(ip, port=9999):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting time remaining from {ip}: {e}")
         return None
 
+def get_allowed_window(ip, port=9999):
+    """Get the allowed usage window ('07:00-22:00' or 'OFF')."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.7)
+        s.connect((ip, port))
+        s.send(b"GET_ALLOWED_WINDOW")
+        window = s.recv(1024).decode().strip()
+        s.close()
+        return None if window in ("", "OFF", "Unknown") else window
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting allowed window from {ip}: {e}")
+        return None
+
+def get_unlock_status(ip, port=9999):
+    """Get the temporary-unlock status ('ACTIVE 25 minutes' / 'INACTIVE')."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.7)
+        s.connect((ip, port))
+        s.send(b"GET_UNLOCK_STATUS")
+        status = s.recv(1024).decode().strip()
+        s.close()
+        return status
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting unlock status from {ip}: {e}")
+        return None
+
 def scan_for_servers(port=9999):
     """Scan the local network for PCs running the control server"""
     global discovered_pcs, last_scan_time
@@ -279,6 +310,8 @@ def control(ip):
     pc_info['usage_limit'] = details.get('usage_limit')
     pc_info['time_remaining'] = details.get('time_remaining')
     pc_info['lock_times'] = details.get('lock_times')
+    pc_info['allowed_window'] = details.get('allowed_window')
+    pc_info['unlock_status'] = details.get('unlock_status')
 
     return render_template('control.html', ip=ip, pc_info=pc_info)
 
@@ -307,6 +340,16 @@ def action():
     elif action_type == 'add_lock_time':
         lock_time = data.get('time', '21:00')
         success, response = send_command(ip, f"ADD_LOCK_TIME:{lock_time}")
+    elif action_type == 'set_allowed_window':
+        window = data.get('window', '07:00-22:00')
+        success, response = send_command(ip, f"SET_ALLOWED_WINDOW:{window}")
+    elif action_type == 'clear_allowed_window':
+        success, response = send_command(ip, "CLEAR_ALLOWED_WINDOW")
+    elif action_type == 'unlock':
+        minutes = data.get('minutes', 30)
+        success, response = send_command(ip, f"UNLOCK:{minutes}")
+    elif action_type == 'cancel_unlock':
+        success, response = send_command(ip, "CANCEL_UNLOCK")
     elif action_type == 'clear_usage_limit':
         success, response = send_command(ip, "CLEAR_USAGE_LIMIT")
     elif action_type == 'clear_lock_times':
@@ -614,6 +657,23 @@ CONTROL_TEMPLATE = '''
             {% endif %}
             </p>
 
+            <!-- Allowed Window -->
+            <p>🕒 <strong>Allowed Window:</strong>
+            {% if pc_info.get('allowed_window') %}
+                {{ pc_info.allowed_window }}
+                <button onclick="clearAllowedWindow()" style="margin-left: 10px; padding: 5px 10px; background-color: #f44336; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">❌ Turn off</button>
+            {% else %}
+                <span style="color: #999;">Off (PC usable any time)</span>
+            {% endif %}
+            </p>
+
+            <!-- Temporary Unlock -->
+            {% if pc_info.get('unlock_status') and pc_info.get('unlock_status').startswith('ACTIVE') %}
+            <p>🔓 <strong>Temporary Unlock:</strong> <span style="color: #4CAF50; font-weight: bold;">{{ pc_info.unlock_status }}</span>
+                <button onclick="cancelUnlock()" style="margin-left: 10px; padding: 5px 10px; background-color: #f44336; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">❌ Cancel</button>
+            </p>
+            {% endif %}
+
             <!-- Clear All Button -->
             {% if pc_info.get('usage_limit') or pc_info.get('lock_times') %}
             <button onclick="clearLimit('all')" style="width: 100%; margin-top: 10px; padding: 10px; background-color: #ff5722; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px;">🗑️ Clear All Limits</button>
@@ -633,6 +693,13 @@ CONTROL_TEMPLATE = '''
             <button class="btn btn-lock" onclick="performAction('lock')">
                 Lock Computer Now
             </button>
+            <div style="color: #666; font-size: 13px; margin-top: 12px;">Grant bonus time (overrides the window and the daily limit, not charged to the budget):</div>
+            <div style="display: flex; align-items: center; gap: 10px; margin-top: 6px;">
+                <input type="number" id="unlock-minutes" value="30" min="1" max="240" style="flex: 1;" title="Unlock duration in minutes">
+                <button class="btn btn-lock" onclick="performUnlock()" style="flex: 1; background-color: #4CAF50;">
+                    🔓 Unlock
+                </button>
+            </div>
             <button class="btn btn-shutdown" onclick="confirmAndPerform('shutdown')">
                 Shutdown Computer
             </button>
@@ -658,6 +725,22 @@ CONTROL_TEMPLATE = '''
             <input type="number" id="limit-minutes" placeholder="Or enter minutes...">
             <button class="btn btn-limit" onclick="setLimit()">
                 Set Time Limit
+            </button>
+        </div>
+
+        <div class="action-group">
+            <div class="action-title">🕒 Set Allowed Window</div>
+            <div style="color: #666; font-size: 14px; margin-bottom: 5px;">
+                Hours the PC may be used. Outside them it locks and re-locks; leave it off
+                (no window set) and only the daily limit and scheduled locks apply.
+            </div>
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <input type="time" id="allowed-start" value="07:00" style="flex: 1;">
+                <span>to</span>
+                <input type="time" id="allowed-end" value="22:00" style="flex: 1;">
+            </div>
+            <button class="btn btn-limit" onclick="setAllowedWindow()">
+                Set Allowed Window
             </button>
         </div>
         
@@ -787,6 +870,63 @@ CONTROL_TEMPLATE = '''
                 showStatus(data.response, data.success);
                 if (data.success) {
                     // Reload page after 1 second to show updated settings
+                    setTimeout(() => {
+                        location.reload();
+                    }, 1000);
+                }
+            });
+        }
+
+        function performUnlock() {
+            const minutes = parseInt(document.getElementById('unlock-minutes').value, 10);
+            if (!minutes || minutes < 1) {
+                showStatus('Please enter a valid unlock duration (minutes)', false);
+                return;
+            }
+            if (!confirm(`Grant ${minutes} minutes of bonus time? It overrides the allowed window and the daily limit, and is not charged to the budget.`)) {
+                return;
+            }
+            postAction({ip: '{{ ip }}', action: 'unlock', minutes: minutes});
+        }
+
+        function cancelUnlock() {
+            if (!confirm('Cancel the current temporary unlock?')) {
+                return;
+            }
+            postAction({ip: '{{ ip }}', action: 'cancel_unlock'});
+        }
+
+        function setAllowedWindow() {
+            const start = document.getElementById('allowed-start').value;
+            const end = document.getElementById('allowed-end').value;
+            if (!start || !end) {
+                showStatus('Please select both start and end times', false);
+                return;
+            }
+            if (start === end) {
+                showStatus('Start and end must differ', false);
+                return;
+            }
+            postAction({ip: '{{ ip }}', action: 'set_allowed_window', window: start + '-' + end});
+        }
+
+        function clearAllowedWindow() {
+            if (!confirm('Stop enforcing the allowed window? The PC becomes usable any time.')) {
+                return;
+            }
+            postAction({ip: '{{ ip }}', action: 'clear_allowed_window'});
+        }
+
+        function postAction(payload) {
+            fetch('/action', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            })
+            .then(response => response.json())
+            .then(data => {
+                showStatus(data.response, data.success);
+                if (data.success) {
                     setTimeout(() => {
                         location.reload();
                     }, 1000);
