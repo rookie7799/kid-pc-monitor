@@ -4,6 +4,7 @@ import threading
 import ipaddress
 import time
 from datetime import datetime
+from pathlib import Path
 
 app = Flask(__name__)
 
@@ -16,6 +17,73 @@ CUSTOM_PC_NAMES = {
     # Example: '192.168.1.105': 'Tommy\'s Laptop',
     # Example: '192.168.1.112': 'Sarah\'s Desktop',
 }
+
+# Per-PC status cache with TTL to avoid a TCP round-trip on every page render.
+# Cached values (status, current_user, usage_limit, time_remaining,
+# lock_times) are refreshed only after STATUS_CACHE_TTL seconds, or on-demand
+# by /scan and after a state-changing /action. A PC that stops answering within
+# the TTL shows stale-but-fast data until the next refresh.
+STATUS_CACHE_TTL = 10.0
+status_cache = {}  # ip -> { 'values': {...}, 'ts': monotonic_ts }
+_cache_lock = threading.Lock()
+
+def _cache_get(ip):
+    entry = status_cache.get(ip)
+    if entry and (time.monotonic() - entry['ts']) < STATUS_CACHE_TTL:
+        return entry['values']
+    return None
+
+def _cache_set(ip, values):
+    with _cache_lock:
+        status_cache[ip] = {'values': values, 'ts': time.monotonic()}
+
+def _refresh_pc_details(ip, port=9999):
+    """Fetch all per-PC details in parallel and store them in the cache.
+
+    Returns the cached values dict. Each field is fetched independently and
+    missing/errored fields fall back to the previous cached value (or None).
+    """
+    results = {}
+
+    def fetch(key, fn):
+        try:
+            results[key] = fn(ip, port)
+        except Exception:
+            results[key] = None
+
+    threads = [
+        threading.Thread(target=fetch, args=('status', check_pc_status)),
+        threading.Thread(target=fetch, args=('current_user', get_current_user)),
+        threading.Thread(target=fetch, args=('usage_limit', get_usage_limit)),
+        threading.Thread(target=fetch, args=('time_remaining', get_time_remaining)),
+        threading.Thread(target=fetch, args=('lock_times', get_lock_times)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Merge onto the previous cached values so transient errors never blank a PC.
+    prev = status_cache.get(ip, {}).get('values', {}) if ip in status_cache else {}
+    merged = dict(prev)
+    for k, v in results.items():
+        if v is not None:
+            merged[k] = v
+    _cache_set(ip, merged)
+    return merged
+
+def _pc_details(ip, port=9999):
+    """Return per-PC details, refreshing the cache only if stale/absent."""
+    cached = _cache_get(ip)
+    if cached is not None:
+        return cached
+    # Guard against stampede: only one thread refreshes, others reuse whatever
+    # becomes available.
+    with _cache_lock:
+        if (ip in status_cache
+                and (time.monotonic() - status_cache[ip]['ts']) < STATUS_CACHE_TTL):
+            return status_cache[ip]['values']
+    return _refresh_pc_details(ip, port)
 
 def get_local_ip():
     """Get the local IP address of this machine"""
@@ -33,7 +101,7 @@ def check_pc_status(ip, port=9999):
     try:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Checking status of {ip}")
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
+        s.settimeout(0.7)
         s.connect((ip, port))
         s.send(b"GET_STATUS")
         status = s.recv(1024).decode().strip()
@@ -48,7 +116,7 @@ def get_current_user(ip, port=9999):
     """Get the current username logged in on the kid PC (as reported by the agent)."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
+        s.settimeout(0.7)
         s.connect((ip, port))
         s.send(b"GET_CURRENT_USER")
         username = s.recv(1024).decode().strip()
@@ -62,7 +130,7 @@ def get_usage_limit(ip, port=9999):
     """Get the current usage limit in minutes"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
+        s.settimeout(0.7)
         s.connect((ip, port))
         s.send(b"GET_USAGE_LIMIT")
         limit = s.recv(1024).decode().strip()
@@ -90,7 +158,10 @@ def get_time_remaining(ip, port=9999):
     """Get time remaining until next lock"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
+        # A slow agent (busy console session) can need more than 0.7s to answer;
+        # this field gets a longer budget because _refresh_pc_details fetches
+        # every field in its own thread, so the page still renders fast.
+        s.settimeout(2.0)
         s.connect((ip, port))
         s.send(b"GET_TIME_REMAINING")
         remaining = s.recv(1024).decode().strip()
@@ -141,6 +212,9 @@ def scan_for_servers(port=9999):
                     'locked': False,  # Will update in separate check
                     'last_seen': datetime.now()
                 }
+                # A fresh scan may reveal new state; drop this PC's stale cache.
+                with _cache_lock:
+                    status_cache.pop(str(ip), None)
         except:
             pass
     
@@ -172,15 +246,15 @@ def send_command(host, command, port=9999):
 @app.route('/')
 def index():
     """Main page showing all discovered PCs"""
-    # Update lock status and current user for all PCs
+    # Pull per-PC details from the TTL cache (refreshed in parallel only when
+    # stale) instead of blocking on a fresh TCP round-trip per field per load.
     for ip in discovered_pcs:
-        status = check_pc_status(ip)
-        discovered_pcs[ip]['locked'] = (status == "LOCKED")
-
-        # Get current user
-        username = get_current_user(ip)
-        if username:
-            discovered_pcs[ip]['current_user'] = username
+        details = _pc_details(ip)
+        discovered_pcs[ip]['locked'] = (details.get('status') == "LOCKED")
+        if details.get('current_user'):
+            discovered_pcs[ip]['current_user'] = details['current_user']
+        discovered_pcs[ip]['usage_limit'] = details.get('usage_limit')
+        discovered_pcs[ip]['time_remaining'] = details.get('time_remaining')
 
     return render_template('index.html',
                          pcs=discovered_pcs,
@@ -196,24 +270,15 @@ def scan():
 def control(ip):
     """Control page for a specific PC"""
     pc_info = discovered_pcs.get(ip, {'hostname': 'Unknown', 'status': 'unknown'})
-    # Check current lock status
-    status = check_pc_status(ip)
-    pc_info['locked'] = (status == "LOCKED")
-
-    # Get current user
-    username = get_current_user(ip)
-    if username:
-        pc_info['current_user'] = username
-
-    # Get current limits and time remaining (always update, even if None)
-    usage_limit = get_usage_limit(ip)
-    pc_info['usage_limit'] = usage_limit  # Update even if None to clear old values
-
-    lock_times = get_lock_times(ip)
-    pc_info['lock_times'] = lock_times  # Update even if None to clear old values
-
-    time_remaining = get_time_remaining(ip)
-    pc_info['time_remaining'] = time_remaining  # Update even if None
+    # Fetch all per-PC details via the TTL cache (parallel refresh when stale).
+    details = _pc_details(ip)
+    pc_info['locked'] = (details.get('status') == "LOCKED")
+    if details.get('current_user'):
+        pc_info['current_user'] = details['current_user']
+    # Update even if None to clear old values.
+    pc_info['usage_limit'] = details.get('usage_limit')
+    pc_info['time_remaining'] = details.get('time_remaining')
+    pc_info['lock_times'] = details.get('lock_times')
 
     return render_template('control.html', ip=ip, pc_info=pc_info)
 
@@ -250,6 +315,12 @@ def action():
         success, response = send_command(ip, "CLEAR_ALL")
     else:
         success, response = False, "Unknown action"
+
+    # Any state-changing action invalidates the per-PC cache so the next
+    # page render reflects the new value instead of the stale cached one.
+    if success and ip:
+        with _cache_lock:
+            status_cache.pop(ip, None)
 
     return jsonify({'success': success, 'response': response})
 
@@ -765,14 +836,17 @@ CONTROL_TEMPLATE = '''
 </html>
 '''
 
-# Create template files
-import os
-os.makedirs('templates', exist_ok=True)
+# Create template files next to this module: that is where Flask looks for
+# them (its root path is src/). Writing to the current working directory left
+# the panel serving a stale src/templates copy whenever it was started from
+# anywhere but src/.
+template_dir = Path(__file__).resolve().parent / 'templates'
+template_dir.mkdir(exist_ok=True)
 
-with open('templates/index.html', 'w', encoding='utf-8') as f:
+with (template_dir / 'index.html').open('w', encoding='utf-8') as f:
     f.write(INDEX_TEMPLATE)
 
-with open('templates/control.html', 'w', encoding='utf-8') as f:
+with (template_dir / 'control.html').open('w', encoding='utf-8') as f:
     f.write(CONTROL_TEMPLATE)
 
 if __name__ == '__main__':

@@ -5,8 +5,12 @@ import datetime
 import ctypes
 import socket
 import threading
-import tkinter as tk
-from tkinter import messagebox
+try:
+    import tkinter as tk
+    from tkinter import messagebox
+except ImportError:  # Headless/Linux test runs: the agent logic must still import.
+    tk = None
+    messagebox = None
 from datetime import datetime, time as dtime, timedelta
 import subprocess
 from ctypes import wintypes
@@ -63,10 +67,24 @@ if sys.stdout is None or sys.stderr is None:
         sys.stderr = _console_log
 
 class PCTimeControl:
+    # Maximum active usage that may be lost on an unclean shutdown: the state
+    # file is rewritten every SAVE_INTERVAL_SECONDS of accrued usage.
+    SAVE_INTERVAL_SECONDS = 30
+    # A polling step longer than this means the machine slept, hibernated, or
+    # the loop stalled: that gap is not usage and must not be charged.
+    MAX_SAMPLE_GAP_SECONDS = 15
+
     def __init__(self):
         self.lock_times = []
         self.usage_limit = None
         self.start_time = datetime.now()
+        # Active (unlocked) usage accrued for the current day. The daily limit
+        # is a budget of *used* time, not wall-clock time since start_time: a
+        # locked screen or an exempt parent must not burn the child's budget.
+        self.accrued_seconds = 0.0
+        # accrued_seconds as last written to disk, so the monitor persists on a
+        # fixed schedule instead of guessing with a modulo check.
+        self.last_saved_accrued = 0.0
         self.is_locked = False
         self.last_activity = datetime.now()
         self.current_user = getpass.getuser()
@@ -123,19 +141,46 @@ class PCTimeControl:
                 if 'usage_limit' in state:
                     self.usage_limit = state['usage_limit']
 
+                # Restore accrued active usage (0 for state files written
+                # before usage was tracked independently of start_time).
+                legacy_usage = 'accrued_seconds' not in state
+                self.accrued_seconds = float(state.get('accrued_seconds') or 0.0)
+                # The value just read is, by definition, what is on disk.
+                self.last_saved_accrued = self.accrued_seconds
+
                 # Restore start time (for usage tracking)
                 if 'start_time' in state:
                     saved_start_time = datetime.fromisoformat(state['start_time'])
                     current_date = datetime.now().date()
                     saved_date = saved_start_time.date()
 
-                    # If start_time is from a previous day, reset it to today
-                    if saved_date < current_date:
+                    # A usage limit is daily. Never carry elapsed time across a
+                    # date boundary (and recover safely from a future date left
+                    # by a clock correction). Both the start_time AND the
+                    # accrued usage reset — otherwise yesterday's exhausted
+                    # limit "sticks" to the new day and the PC shows 0 minutes
+                    # remaining right after boot.
+                    if saved_date != current_date:
                         self.start_time = datetime.now()
+                        self.accrued_seconds = 0.0
+                        self.last_saved_accrued = 0.0
                         self.logger.info(f"Start time was from {saved_date}, reset to today")
                         print(f"[{datetime.now():%H:%M:%S}] Usage timer reset for new day")
                     else:
                         self.start_time = saved_start_time
+                        if legacy_usage:
+                            # Usage used to be derived from the wall-clock
+                            # distance since start_time. Convert the same-day
+                            # elapsed time once, so upgrading mid-day does not
+                            # hand the child a fresh budget.
+                            self.accrued_seconds = max(
+                                0.0,
+                                (datetime.now() - saved_start_time).total_seconds(),
+                            )
+                            self.logger.info(
+                                "Migrated legacy state: %.0f s of usage today",
+                                self.accrued_seconds,
+                            )
 
                 self.logger.info(f"State loaded: {len(self.lock_times)} lock times, usage limit: {self.usage_limit}")
                 print(f"[{datetime.now():%H:%M:%S}] Loaded previous settings from {self.state_file}")
@@ -149,12 +194,17 @@ class PCTimeControl:
             state = {
                 'lock_times': [f"{lt.hour}:{lt.minute}" for lt in self.lock_times],
                 'usage_limit': self.usage_limit,
+                'accrued_seconds': round(self.accrued_seconds, 1),
                 'start_time': self.start_time.isoformat(),
                 'current_user': self.current_user
             }
 
             with open(self.state_file, 'w') as f:
                 json.dump(state, f, indent=2)
+
+            # Remember what went to disk so the monitor persists on accumulated
+            # usage instead of re-saving at arbitrary moments.
+            self.last_saved_accrued = self.accrued_seconds
 
             self.logger.info("State saved successfully")
         except Exception as e:
@@ -180,7 +230,9 @@ class PCTimeControl:
             return False
 
     def monitor_activity(self):
-        """Monitor lock/unlock status"""
+        """Monitor lock/unlock status and accrue active (unlocked) usage time."""
+        last = time.monotonic()
+        last_date = datetime.now().date()
         while True:
             actual_locked = self.check_if_locked()
 
@@ -191,9 +243,80 @@ class PCTimeControl:
 
             # Detect manual lock (not by our script)
             elif not self.is_locked and actual_locked:
+                self.is_locked = True
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] PC has been locked (detected)")
 
+            # Accrue active usage only while the PC is unlocked and the console
+            # user is monitored: neither a lock screen nor a parent's own
+            # session may consume the child's daily budget.
+            now = time.monotonic()
+            current_time = datetime.now()
+            delta = self._active_sample_seconds(now - last, last_date,
+                                                current_time.date())
+            last = now
+            last_date = current_time.date()
+            if self._should_accrue_time():
+                self.reset_daily_usage_if_needed(current_time)
+                self._accrue_usage(delta)
+
             time.sleep(3)  # Check every 3 seconds
+
+    @classmethod
+    def _active_sample_seconds(cls, elapsed, previous_date, current_date):
+        """Return the seconds of this poll that count as usage.
+
+        A gap across midnight belongs to neither day and a gap larger than
+        MAX_SAMPLE_GAP_SECONDS is sleep/hibernate/stall, not screen time.
+        """
+        if previous_date != current_date or elapsed > cls.MAX_SAMPLE_GAP_SECONDS:
+            return 0.0
+        return max(0.0, elapsed)
+
+    def _should_accrue_time(self):
+        """Whether this poll's time should count against the daily limit."""
+        return not self.is_locked and self.should_monitor_user()
+
+    def _accrue_usage(self, delta_seconds):
+        """Add active usage time and persist it on a predictable schedule.
+
+        The state file is rewritten every SAVE_INTERVAL_SECONDS of *accumulated*
+        usage, so an unclean shutdown loses at most that much. Tracking the
+        delta against the last save is deliberate: a modulo check on the running
+        total lands on the interval only by luck, so it saved erratically.
+        """
+        if self.usage_limit is None:
+            return
+        with self.state_lock:
+            self.accrued_seconds += delta_seconds
+        if self.accrued_seconds - self.last_saved_accrued >= self.SAVE_INTERVAL_SECONDS:
+            # Mark the value flushed before writing so a failed write does not
+            # turn the next tick into an immediate retry loop.
+            self.last_saved_accrued = self.accrued_seconds
+            self.save_state()
+
+    def reset_daily_usage_if_needed(self, current_time=None):
+        """Start a fresh daily budget when the calendar day changes.
+
+        Returns True when a reset happened. Without this the agent only reset on
+        startup, so a PC left running overnight kept yesterday's exhausted
+        counter until the next reboot.
+        """
+        current_time = current_time or datetime.now()
+        with self.state_lock:
+            if self.start_time.date() == current_time.date():
+                return False
+            previous_date = self.start_time.date()
+            self.start_time = current_time
+            self.accrued_seconds = 0.0
+            self.last_saved_accrued = 0.0
+            self.warnings_sent.clear()
+            self.last_remaining = None  # Re-arm crossing detection
+        self.save_state()
+        self.logger.info(
+            "Usage timer reset for new day (previous start date: %s)",
+            previous_date,
+        )
+        return True
 
     def add_scheduled_lock(self, hour, minute):
         """Add a time when the PC should be locked"""
@@ -205,6 +328,10 @@ class PCTimeControl:
 
     def show_message(self, message, title="PC Time Control"):
         """Display a message using tkinter"""
+        if tk is None:
+            self.logger.error("Cannot show message (Tkinter unavailable): %s", message)
+            return
+
         def display():
             root = None
             try:
@@ -253,18 +380,19 @@ class PCTimeControl:
         """Cancel pending shutdown"""
         os.system('shutdown /a')
 
-    def get_time_remaining(self):
+    def get_time_remaining(self, current_time=None):
         """Calculate minutes remaining until lock. Returns None if no limit set."""
         if not self.should_monitor_user():
             return None
 
-        current_time = datetime.now()
+        current_time = current_time or datetime.now()
+        self.reset_daily_usage_if_needed(current_time)
         min_remaining = None
 
         with self.state_lock:
             lock_times = list(self.lock_times)
             usage_limit = self.usage_limit
-            start_time = self.start_time
+            usage_minutes = self.accrued_seconds / 60.0
 
         # Check scheduled lock times
         for lock_time in lock_times:
@@ -284,7 +412,6 @@ class PCTimeControl:
         # Check usage limit. Use `is not None` so a limit of 0 (lock immediately)
         # is honoured rather than treated as "no limit" by a falsy check.
         if usage_limit is not None:
-            usage_minutes = (current_time - start_time).total_seconds() / 60
             minutes_until_limit = usage_limit - usage_minutes
 
             if min_remaining is None or minutes_until_limit < min_remaining:
@@ -341,18 +468,19 @@ class PCTimeControl:
             self.logger.info(f"Warning sent: {warning_mins} minutes remaining")
             print(f"[{datetime.now():%H:%M:%S}] Warning: {warning_mins} minutes until lock")
 
-    def check_time_limits(self):
+    def check_time_limits(self, current_time=None):
         """Check if any time limits have been reached"""
         # Skip all checks if user is exempt from monitoring
         if not self.should_monitor_user():
             return False, ""
 
-        current_time = datetime.now()
+        current_time = current_time or datetime.now()
+        self.reset_daily_usage_if_needed(current_time)
 
         with self.state_lock:
             lock_times = list(self.lock_times)
             usage_limit = self.usage_limit
-            start_time = self.start_time
+            usage_minutes = self.accrued_seconds / 60.0
 
         # Check scheduled lock times. Match the whole target minute, not just
         # its first second: the monitor loop does work + sleep(1) each pass and
@@ -365,7 +493,6 @@ class PCTimeControl:
         # Check usage limit. Use `is not None` so a limit of 0 (lock immediately)
         # is honoured rather than treated as "no limit" by a falsy check.
         if usage_limit is not None:
-            usage_minutes = (current_time - start_time).total_seconds() / 60
             if usage_minutes >= usage_limit:
                 return True, f"Usage limit of {usage_limit} minutes reached"
 
@@ -545,11 +672,15 @@ class RemoteControlServer:
             elif command.startswith("SET_LIMIT:"):
                 try:
                     minutes = int(command.split(":", 1)[1])
-                    # Apply the three related fields atomically so the monitor
-                    # thread never sees the new limit against the old start_time.
+                    # Apply the related fields atomically so the monitor thread
+                    # never sees the new limit against the old usage counter.
                     with self.pc_control.state_lock:
                         self.pc_control.set_usage_limit(minutes)
-                        self.pc_control.start_time = datetime.now()  # Reset start time when setting new limit
+                        self.pc_control.start_time = datetime.now()  # Reset day anchor when setting new limit
+                        # A new limit grants a fresh budget: the child has not
+                        # used it yet.
+                        self.pc_control.accrued_seconds = 0.0
+                        self.pc_control.last_saved_accrued = 0.0
                         self.pc_control.warnings_sent.clear()  # Clear warnings for new limit
                         self.pc_control.last_remaining = None  # Re-arm crossing detection
                     self.pc_control.save_state()  # Save state after setting limit
