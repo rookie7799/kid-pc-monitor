@@ -4,6 +4,7 @@ import threading
 import ipaddress
 import time
 from datetime import datetime
+from pathlib import Path
 
 app = Flask(__name__)
 
@@ -835,14 +836,17 @@ CONTROL_TEMPLATE = '''
 </html>
 '''
 
-# Create template files
-import os
-os.makedirs('templates', exist_ok=True)
+# Create template files next to this module: that is where Flask looks for
+# them (its root path is src/). Writing to the current working directory left
+# the panel serving a stale src/templates copy whenever it was started from
+# anywhere but src/.
+template_dir = Path(__file__).resolve().parent / 'templates'
+template_dir.mkdir(exist_ok=True)
 
-with open('templates/index.html', 'w', encoding='utf-8') as f:
+with (template_dir / 'index.html').open('w', encoding='utf-8') as f:
     f.write(INDEX_TEMPLATE)
 
-with open('templates/control.html', 'w', encoding='utf-8') as f:
+with (template_dir / 'control.html').open('w', encoding='utf-8') as f:
     f.write(CONTROL_TEMPLATE)
 
 if __name__ == '__main__':
