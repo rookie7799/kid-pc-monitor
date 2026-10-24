@@ -157,9 +157,9 @@ def get_time_remaining(ip, port=9999):
     """Get time remaining until next lock"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # GET_TIME_REMAINING triggers a PowerShell user check on the agent
-        # (~0.5-1s), so allow up to 2s. Safe here because _refresh_pc_details
-        # fetches each field in its own thread.
+        # A slow agent (busy console session) can need more than 0.7s to answer;
+        # this field gets a longer budget because _refresh_pc_details fetches
+        # every field in its own thread, so the page still renders fast.
         s.settimeout(2.0)
         s.connect((ip, port))
         s.send(b"GET_TIME_REMAINING")
@@ -277,7 +277,7 @@ def control(ip):
     # Update even if None to clear old values.
     pc_info['usage_limit'] = details.get('usage_limit')
     pc_info['time_remaining'] = details.get('time_remaining')
-    pc_info["lock_times"] = details.get("lock_times")
+    pc_info['lock_times'] = details.get('lock_times')
 
     return render_template('control.html', ip=ip, pc_info=pc_info)
 
