@@ -42,7 +42,9 @@ class StatusCacheTests(unittest.TestCase):
              patch.object(web_panel, 'get_current_user', _fake_fetcher('Kids', calls['current_user'])), \
              patch.object(web_panel, 'get_usage_limit', _fake_fetcher(240, calls['usage_limit'])), \
              patch.object(web_panel, 'get_time_remaining', _fake_fetcher('120', calls['time_remaining'])), \
-             patch.object(web_panel, 'get_lock_times', _fake_fetcher(None, calls['lock_times'])):
+             patch.object(web_panel, 'get_lock_times', _fake_fetcher(None, calls['lock_times'])), \
+             patch.object(web_panel, 'get_allowed_window', _fake_fetcher(None, []), create=True), \
+             patch.object(web_panel, 'get_unlock_status', _fake_fetcher('INACTIVE', []), create=True):
             first = web_panel._pc_details(IP)
             second = web_panel._pc_details(IP)
 
@@ -63,7 +65,9 @@ class StatusCacheTests(unittest.TestCase):
              patch.object(web_panel, 'get_current_user', _fake_fetcher(None, [])), \
              patch.object(web_panel, 'get_usage_limit', _fake_fetcher(None, [])), \
              patch.object(web_panel, 'get_time_remaining', _fake_fetcher(None, [])), \
-             patch.object(web_panel, 'get_lock_times', _fake_fetcher(None, [])):
+             patch.object(web_panel, 'get_lock_times', _fake_fetcher(None, [])), \
+             patch.object(web_panel, 'get_allowed_window', _fake_fetcher(None, []), create=True), \
+             patch.object(web_panel, 'get_unlock_status', _fake_fetcher('INACTIVE', []), create=True):
             details = web_panel._pc_details(IP)
 
         self.assertEqual(details['status'], 'LOCKED')
@@ -77,7 +81,9 @@ class StatusCacheTests(unittest.TestCase):
              patch.object(web_panel, 'get_current_user', _fake_fetcher('Kids', [])), \
              patch.object(web_panel, 'get_usage_limit', _fake_fetcher(120, [])), \
              patch.object(web_panel, 'get_time_remaining', _fake_fetcher('60', [])), \
-             patch.object(web_panel, 'get_lock_times', _fake_fetcher(None, [])):
+             patch.object(web_panel, 'get_lock_times', _fake_fetcher(None, [])), \
+             patch.object(web_panel, 'get_allowed_window', _fake_fetcher(None, []), create=True), \
+             patch.object(web_panel, 'get_unlock_status', _fake_fetcher('INACTIVE', []), create=True):
             client = web_panel.app.test_client()
             first = client.get('/')
             second = client.get('/')
@@ -92,6 +98,8 @@ class StatusCacheTests(unittest.TestCase):
              patch.object(web_panel, 'get_usage_limit', _fake_fetcher(120, [])), \
              patch.object(web_panel, 'get_time_remaining', _fake_fetcher('60', [])), \
              patch.object(web_panel, 'get_lock_times', _fake_fetcher(None, [])), \
+             patch.object(web_panel, 'get_allowed_window', _fake_fetcher(None, []), create=True), \
+             patch.object(web_panel, 'get_unlock_status', _fake_fetcher('INACTIVE', []), create=True), \
              patch.object(web_panel, 'send_command', return_value=(True, 'OK')):
             web_panel._pc_details(IP)
             self.assertIn(IP, web_panel.status_cache)
