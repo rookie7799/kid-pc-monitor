@@ -245,7 +245,13 @@ EXEMPT_USERS = []
 Settings are automatically saved to `pc_control_state.json` including:
 - Daily usage limits
 - Scheduled lock times
+- Accrued active usage for the current day (`accrued_seconds`), saved every
+  30 s of usage so an unclean shutdown loses at most that much
 - Start time for usage tracking
+
+The daily limit is a budget of **active, unlocked** time. Time spent at the
+lock screen, signed in as an exempt parent, with the PC asleep, or before
+midnight does not consume it, and the counter starts fresh each calendar day.
 
 This means restrictions **survive PC restarts** - kids can't bypass by rebooting!
 
