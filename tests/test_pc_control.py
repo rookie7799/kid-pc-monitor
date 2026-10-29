@@ -425,6 +425,89 @@ class AllowedWindowTests(unittest.TestCase):
         self.assertEqual(control.get_allowed_window(), (None, None))
 
 
+class CountdownDeadlineTests(unittest.TestCase):
+    """Everything that can end the session must be a countdown deadline.
+
+    Before this, only a lock time or an exhausted budget produced a countdown,
+    so a kid inside a 07:00-22:00 window with no daily limit was locked at 22:00
+    without a single warning.
+    """
+
+    def test_window_end_is_counted_down(self):
+        evening = datetime(2026, 7, 30, 21, 40, 0)
+        control = make_control(evening, usage_limit=None,
+                               allowed_start=pc_control.dtime(7, 0),
+                               allowed_end=pc_control.dtime(22, 0))
+
+        self.assertAlmostEqual(control.get_time_remaining(evening), 20.0)
+
+    def test_window_end_warns_before_locking(self):
+        evening = datetime(2026, 7, 30, 21, 44, 0)
+        control = make_control(evening, usage_limit=None,
+                               allowed_start=pc_control.dtime(7, 0),
+                               allowed_end=pc_control.dtime(22, 0))
+        control.show_message = Mock()
+
+        # 21:44 has no countdown deadline to cross yet; every later step does.
+        for minute in (44, 45, 55, 59):
+            now = evening.replace(minute=minute)
+            control.get_time_remaining = Mock(
+                return_value=control._minutes_until_window_end(
+                    now, pc_control.dtime(7, 0), pc_control.dtime(22, 0)))
+            control.check_and_send_warnings()
+
+        sent = [call.args[0] for call in control.show_message.call_args_list]
+        self.assertEqual(len(sent), 3, sent)
+        for expected_text, message in zip(('15 minutes', '5 minutes', '1 minute'), sent):
+            self.assertIn(expected_text, message)
+
+    def test_window_crossing_midnight_counts_to_tomorrow(self):
+        night = datetime(2026, 7, 30, 23, 0, 0)
+        control = make_control(night, usage_limit=None,
+                               allowed_start=pc_control.dtime(22, 0),
+                               allowed_end=pc_control.dtime(7, 0))
+
+        self.assertAlmostEqual(control.get_time_remaining(night), 8 * 60.0)
+
+    def test_window_already_closed_counts_down_to_zero(self):
+        night = datetime(2026, 7, 30, 23, 0, 0)
+        control = make_control(night, usage_limit=None,
+                               allowed_start=pc_control.dtime(7, 0),
+                               allowed_end=pc_control.dtime(22, 0))
+
+        self.assertEqual(control.get_time_remaining(night), 0)
+
+    def test_nothing_pending_means_no_countdown(self):
+        noon = datetime(2026, 7, 30, 12, 0, 0)
+        control = make_control(noon, usage_limit=None)
+
+        self.assertIsNone(control.get_time_remaining(noon))
+
+
+class WindowBoundaryTests(unittest.TestCase):
+    """The window end is exclusive: "until 22:00" locks at 22:00."""
+
+    def test_window_end_locks_on_the_minute_not_a_minute_later(self):
+        control = make_control(datetime(2026, 7, 30, 21, 59, 0), usage_limit=None,
+                               allowed_start=pc_control.dtime(7, 0),
+                               allowed_end=pc_control.dtime(22, 0))
+
+        self.assertFalse(control.check_time_limits(
+            datetime(2026, 7, 30, 21, 59, 59))[0])
+        self.assertTrue(control.check_time_limits(
+            datetime(2026, 7, 30, 22, 0, 0))[0])
+
+    def test_window_crossing_midnight_locks_at_its_end_time(self):
+        control = make_control(datetime(2026, 7, 30, 6, 59, 0), usage_limit=None,
+                               allowed_start=pc_control.dtime(22, 0),
+                               allowed_end=pc_control.dtime(7, 0))
+
+        self.assertFalse(control.check_time_limits(
+            datetime(2026, 7, 30, 6, 59, 30))[0])
+        self.assertTrue(control.check_time_limits(
+            datetime(2026, 7, 30, 7, 0, 0))[0])
+
+
 class TemporaryUnlockTests(unittest.TestCase):
     """A parent-granted unlock is bonus time: it wins over window and budget."""
 
@@ -489,16 +572,54 @@ class TemporaryUnlockTests(unittest.TestCase):
         self.assertTrue(reached)
         self.assertIn('Scheduled lock', reason)
 
-    def test_no_warning_fires_while_an_unlock_is_running(self):
-        now = datetime(2026, 7, 30, 23, 0, 0)
+    def test_bonus_time_itself_is_the_countdown(self):
+        now = datetime(2026, 7, 30, 18, 0, 0)
+        control = self._walled_control(now, usage_limit=120,
+                                       accrued_seconds=130 * 60)
+        control.unlock_until = now + timedelta(minutes=30)
+
+        # The budget is spent and the window is irrelevant, so the grant is the
+        # only deadline; without it the panel had nothing to count down.
+        self.assertAlmostEqual(control.get_time_remaining(now), 30.0)
+
+    def test_bonus_time_is_warned_about_before_it_runs_out(self):
+        # A live grant: check_and_send_warnings() reads the wall clock, so a
+        # fake date in the past would look like an already expired grant.
+        now = datetime.now()
         control = self._walled_control(now, usage_limit=120,
                                        accrued_seconds=130 * 60)
         control.unlock_until = now + timedelta(minutes=30)
         control.show_message = Mock()
 
+        # 18:14 -> 18:15 crosses the 15-minute threshold while the grant runs.
+        control.get_time_remaining = Mock(return_value=16.0)
+        control.check_and_send_warnings()
+        control.get_time_remaining = Mock(return_value=15.0)
         control.check_and_send_warnings()
 
-        control.show_message.assert_not_called()
+        sent = [call.args[0] for call in control.show_message.call_args_list]
+        self.assertEqual(len(sent), 1, sent)
+        self.assertIn('15 minutes', sent[0])
+
+    def test_a_bedtime_lock_shortens_the_bonus_countdown(self):
+        late = datetime(2026, 7, 30, 21, 50, 0)
+        control = make_control(late, usage_limit=240)
+        control.lock_times = [pc_control.dtime(22, 0)]
+        control.unlock_until = late + timedelta(minutes=40)
+
+        # Bedtime wins even though the grant runs to 22:30.
+        self.assertAlmostEqual(control.get_time_remaining(late), 10.0)
+
+    def test_a_new_grant_rearms_the_warnings(self):
+        now = datetime(2026, 7, 30, 18, 0, 0)
+        control = self._walled_control(now, usage_limit=240)
+        control.warnings_sent = {15, 5, 1}
+        control.last_remaining = 1
+
+        control.unlock_for(30)
+
+        self.assertEqual(control.warnings_sent, set())
+        self.assertIsNone(control.last_remaining)
 
     def test_cancel_unlock_revokes_the_grant(self):
         control = make_control(datetime(2026, 7, 30, 23, 0, 0))
