@@ -43,6 +43,13 @@ class ControlPageTests(unittest.TestCase):
         self.assertIn(b'07:00-21:30', response.data)
         self.assertIn('Turn off'.encode(), response.data)
 
+    def test_the_grant_button_says_it_grants_time_not_unlocks_the_screen(self):
+        body = web_panel.CONTROL_TEMPLATE
+
+        self.assertIn('Grant bonus time', body)
+        # "Unlock" read as "unlock the screen", but the kid still has to sign in.
+        self.assertNotIn('🔓 Unlock\n', body)
+
     def test_active_unlock_is_shown_with_a_cancel_button(self):
         response = self._render({'status': 'UNLOCKED',
                                  'unlock_status': 'ACTIVE 24 minutes'})

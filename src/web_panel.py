@@ -697,7 +697,7 @@ CONTROL_TEMPLATE = '''
             <div style="display: flex; align-items: center; gap: 10px; margin-top: 6px;">
                 <input type="number" id="unlock-minutes" value="30" min="1" max="240" style="flex: 1;" title="Unlock duration in minutes">
                 <button class="btn btn-lock" onclick="performUnlock()" style="flex: 1; background-color: #4CAF50;">
-                    🔓 Unlock
+                    🎁 Grant bonus time
                 </button>
             </div>
             <button class="btn btn-shutdown" onclick="confirmAndPerform('shutdown')">
