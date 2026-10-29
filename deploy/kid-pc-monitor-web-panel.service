@@ -1,0 +1,22 @@
+[Unit]
+Description=Kid PC Monitor web panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kidmonitor
+Group=kidmonitor
+WorkingDirectory=/opt/kid-pc-monitor/src
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/kid-pc-monitor/.venv/bin/python web_panel.py
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

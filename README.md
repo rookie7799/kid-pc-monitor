@@ -28,6 +28,12 @@ DIY parental control system for parents who code. If you know what 'pip install'
 
 ## 🚀 Quick Start
 
+For the deployment path and its security boundaries, read:
+
+- [docs/README-DEPLOY.md](docs/README-DEPLOY.md) — Linux web-panel deployment
+- [docs/README-WINDOWS-AGENT.md](docs/README-WINDOWS-AGENT.md) — Windows agent installation and verification
+- [SECURITY.md](SECURITY.md) — current risks and required network controls
+
 ## ⚠️ Technical Skills Required
 
 This is NOT a one-click solution. You'll need to:
@@ -242,7 +248,8 @@ EXEMPT_USERS = []
 **Use Case:** If multiple family members share one PC, you can restrict only the children's accounts while leaving parent accounts unrestricted.
 
 ### Persistent State
-Settings are automatically saved to `pc_control_state.json` including:
+Settings are automatically saved to
+`%LOCALAPPDATA%\KidPCMonitor\pc_control_state.json` including:
 - Daily usage limits
 - Scheduled lock times
 - Accrued active usage for the current day (`accrued_seconds`), saved every
@@ -250,6 +257,10 @@ Settings are automatically saved to `pc_control_state.json` including:
 - The allowed-hours window (`allowed_start`/`allowed_end`, absent = off)
 - A running temporary unlock (`unlock_until`)
 - Start time for usage tracking
+
+A build that kept this file next to the code is upgraded automatically: on
+start, a `pc_control_state.json` found in the program folder (or the working
+directory) is copied to the path above and the migration is logged.
 
 The daily limit is a budget of **active, unlocked** time. Time spent at the
 lock screen, signed in as an exempt parent, with the PC asleep, or before
@@ -317,7 +328,7 @@ nothing shows up, see the task-troubleshooting note below.
 ### "Lock status not updating"
 - Restart pc_control.py
 - Check if LogonUI.exe detection works
-- Check `pc_control.log` and `pc_control.out.log` in the `src` folder (the agent runs without a console window)
+- Check `pc_control.log` and `pc_control.out.log` in `%LOCALAPPDATA%\KidPCMonitor` (the agent runs without a console window)
 
 ### "Task installed but the agent never runs (port 9999 not listening; clicking Run does nothing)"
 - Almost always the **wrong user account**: the scheduled task was created for
@@ -329,8 +340,9 @@ nothing shows up, see the task-troubleshooting note below.
 - It runs when you start it manually but not as a task: that confirms the above —
   manual runs use *your* logged-in session, the task uses the account it was
   created for.
-- Check the agent's logs in the **`src` folder** (the task's working directory):
-  `pc_control.log` (look for `Server started on port 9999`) and `pc_control.out.log`.
+- Check the agent's logs in **`%LOCALAPPDATA%\KidPCMonitor`**:
+  `pc_control.log` (look for `Server started on port 9999`) and
+  `pc_control.out.log`.
 
 ## 🛡️ Security Notes
 
