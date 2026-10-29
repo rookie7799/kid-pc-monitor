@@ -329,11 +329,17 @@ def print_logon_start_hint(target_user):
     print("=" * 45)
 
 def manual_firewall_command():
-    """The netsh command a user can run by hand to open the agent port."""
+    """The netsh command a user can run by hand to open the agent port.
+
+    Scope is fixed to the LAN subnet: the agent trusts every client that can
+    reach AGENT_PORT, so a rule open to `Any` would expose the PC to whatever
+    the network lets through. A parent who wants a single trusted host can
+    still narrow the rule afterwards.
+    """
     return (
         f'netsh advfirewall firewall add rule '
         f'name="{FIREWALL_RULE_NAME}" dir=in action=allow '
-        f'protocol=TCP localport={AGENT_PORT}'
+        f'protocol=TCP localport={AGENT_PORT} remoteip=LocalSubnet'
     )
 
 def configure_firewall():

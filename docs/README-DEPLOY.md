@@ -120,8 +120,8 @@ Keep evidence (command output or screenshots) for every checked item:
 - [ ] The limit remains after restarting Windows/the agent.
 - [ ] The next calendar day starts a fresh daily window.
 - [ ] A parent/exempt account is not restricted.
-- [ ] TCP 9999 is reachable from the panel server and blocked from other LAN
-  clients.
+- [ ] TCP 9999 is reachable from the panel server (the agent rule is scoped to
+  the LAN subnet) and times out from outside the LAN.
 
 Do not declare the baseline deployed until the tests requiring real server and
 Windows hosts have been observed on those hosts.

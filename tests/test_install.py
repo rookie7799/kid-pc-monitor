@@ -14,6 +14,12 @@ class ScheduledTaskPathTests(unittest.TestCase):
             f'"{script_path}"',
         )
 
+    def test_firewall_rule_is_scoped_to_the_lan_subnet(self):
+        command = install.manual_firewall_command()
+
+        self.assertIn("remoteip=LocalSubnet", command)
+        self.assertNotIn("any", command.lower())
+
     def test_escapes_single_quote_in_powershell_literal(self):
         self.assertEqual(
             install.quote_powershell_literal("C:\\Parent's App"),

@@ -258,6 +258,10 @@ Settings are automatically saved to
 - A running temporary unlock (`unlock_until`)
 - Start time for usage tracking
 
+A build that kept this file next to the code is upgraded automatically: on
+start, a `pc_control_state.json` found in the program folder (or the working
+directory) is copied to the path above and the migration is logged.
+
 The daily limit is a budget of **active, unlocked** time. Time spent at the
 lock screen, signed in as an exempt parent, with the PC asleep, or before
 midnight does not consume it, and the counter starts fresh each calendar day.
@@ -324,7 +328,7 @@ nothing shows up, see the task-troubleshooting note below.
 ### "Lock status not updating"
 - Restart pc_control.py
 - Check if LogonUI.exe detection works
-- Check `pc_control.log` and `pc_control.out.log` in the `src` folder (the agent runs without a console window)
+- Check `pc_control.log` and `pc_control.out.log` in `%LOCALAPPDATA%\KidPCMonitor` (the agent runs without a console window)
 
 ### "Task installed but the agent never runs (port 9999 not listening; clicking Run does nothing)"
 - Almost always the **wrong user account**: the scheduled task was created for
