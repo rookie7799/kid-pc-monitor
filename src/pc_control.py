@@ -16,6 +16,7 @@ import subprocess
 from ctypes import wintypes
 import getpass
 import json
+import shutil
 
 import logging
 from pathlib import Path
@@ -79,6 +80,42 @@ def resolve_data_dir(environ=None):
         return Path(local_appdata) / DATA_DIR_NAME
 
     return Path.cwd()
+
+
+STATE_FILE_NAME = 'pc_control_state.json'
+
+
+def migrate_legacy_state_file(target, legacy_dirs=None):
+    """Copy a pre-DATA_DIR state file once, so an upgrade keeps its settings.
+
+    Before the move to %LOCALAPPDATA%, the state lived next to the code, so an
+    upgrade that only changes the path would silently start from an empty state
+    (no usage limit, no lock times, no window). The scheduled task sets its
+    working directory to the script's folder, so both that folder and the
+    current directory are checked. Returns the source path when a file was
+    copied, otherwise None.
+    """
+    target = Path(target)
+    if target.exists():
+        return None
+
+    if legacy_dirs is None:
+        legacy_dirs = [Path(__file__).resolve().parent, Path.cwd()]
+
+    for legacy_dir in legacy_dirs:
+        legacy_file = Path(legacy_dir) / STATE_FILE_NAME
+        try:
+            if not legacy_file.is_file():
+                continue
+            if legacy_file.resolve() == target.resolve():
+                continue
+        except OSError:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy_file, target)
+        return legacy_file
+    return None
+
 
 
 DATA_DIR = resolve_data_dir()
@@ -153,8 +190,16 @@ class PCTimeControl:
         self.last_activity = datetime.now()
         self.current_user = self._get_console_user() or getpass.getuser()
         self.last_user_refresh = time.monotonic()
-        self.state_file = DATA_DIR / 'pc_control_state.json'
+        self.state_file = DATA_DIR / STATE_FILE_NAME
         self.logger = logging.getLogger('PCTimeControl')
+        # Upgrades from the build that kept the state next to the code would
+        # otherwise start with no limit, no lock times and no window.
+        migrated_from = migrate_legacy_state_file(self.state_file)
+        if migrated_from:
+            self.logger.info(
+                "Migrated previous settings from %s to %s", migrated_from, self.state_file
+            )
+            print(f"[{datetime.now():%H:%M:%S}] Migrated settings from {migrated_from}")
         self.warnings_sent = set()  # Threshold minutes already announced this episode
         self.warning_intervals = [15, 5, 1]  # Warning times in minutes before lock
         # Guards the limit/start_time/warnings_sent state that the server thread
