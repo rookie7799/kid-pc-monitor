@@ -24,6 +24,13 @@ def _fake_fetcher(value, calls):
     return fetch
 
 
+def _failing_fetcher(error, calls):
+    def fetch(ip, port=9999):
+        calls.append(ip)
+        raise error
+    return fetch
+
+
 class StatusCacheTests(unittest.TestCase):
     def setUp(self):
         web_panel.status_cache.clear()
@@ -61,19 +68,47 @@ class StatusCacheTests(unittest.TestCase):
                        'lock_times': ['21:00']},
             'ts': time.monotonic() - web_panel.STATUS_CACHE_TTL - 1,
         }
+        unreachable = OSError('agent busy')
         with patch.object(web_panel, 'check_pc_status', _fake_fetcher('LOCKED', [])), \
-             patch.object(web_panel, 'get_current_user', _fake_fetcher(None, [])), \
+             patch.object(web_panel, 'get_current_user', _failing_fetcher(unreachable, [])), \
+             patch.object(web_panel, 'get_usage_limit', _failing_fetcher(unreachable, [])), \
+             patch.object(web_panel, 'get_time_remaining', _failing_fetcher(unreachable, [])), \
+             patch.object(web_panel, 'get_lock_times', _failing_fetcher(unreachable, [])), \
+             patch.object(web_panel, 'get_allowed_window', _failing_fetcher(unreachable, []), create=True), \
+             patch.object(web_panel, 'get_unlock_status', _failing_fetcher(unreachable, []), create=True):
+            details = web_panel._pc_details(IP)
+
+        self.assertEqual(details['status'], 'LOCKED')
+        # A failed fetch must not blank a field the panel still shows.
+        self.assertEqual(details['current_user'], 'Kids')
+        self.assertEqual(details['usage_limit'], 240)
+        self.assertEqual(details['lock_times'], ['21:00'])
+
+    def test_a_real_no_limit_answer_replaces_the_cached_value(self):
+        # While an exempt parent is signed in the agent really reports "no
+        # limit"; keeping the stale 240 hid that from the parent forever.
+        web_panel.status_cache[IP] = {
+            'values': {'status': 'UNLOCKED', 'current_user': 'Kids',
+                       'usage_limit': 240, 'time_remaining': '120 minutes',
+                       'lock_times': ['21:00'], 'allowed_window': '07:00-22:00',
+                       'unlock_status': 'ACTIVE 20 minutes'},
+            'ts': time.monotonic() - web_panel.STATUS_CACHE_TTL - 1,
+        }
+        with patch.object(web_panel, 'check_pc_status', _fake_fetcher('UNLOCKED', [])), \
+             patch.object(web_panel, 'get_current_user', _fake_fetcher('Parent', [])), \
              patch.object(web_panel, 'get_usage_limit', _fake_fetcher(None, [])), \
-             patch.object(web_panel, 'get_time_remaining', _fake_fetcher(None, [])), \
+             patch.object(web_panel, 'get_time_remaining', _fake_fetcher('No limits set', [])), \
              patch.object(web_panel, 'get_lock_times', _fake_fetcher(None, [])), \
              patch.object(web_panel, 'get_allowed_window', _fake_fetcher(None, []), create=True), \
              patch.object(web_panel, 'get_unlock_status', _fake_fetcher('INACTIVE', []), create=True):
             details = web_panel._pc_details(IP)
 
-        self.assertEqual(details['status'], 'LOCKED')
-        # A transient error (None) must not blank a field the panel still shows.
-        self.assertEqual(details['current_user'], 'Kids')
-        self.assertEqual(details['lock_times'], ['21:00'])
+        self.assertIsNone(details['usage_limit'])
+        self.assertEqual(details['time_remaining'], 'No limits set')
+        self.assertIsNone(details['lock_times'])
+        self.assertIsNone(details['allowed_window'])
+        self.assertEqual(details['unlock_status'], 'INACTIVE')
+        self.assertEqual(details['current_user'], 'Parent')
 
     def test_index_renders_from_the_cache(self):
         calls = []
