@@ -138,7 +138,7 @@ python3 web_panel.py
 
 Then open `http://YOUR-LINUX-IP:5000` from your phone or browser. Allow inbound TCP **5000** on the Linux host (example with UFW: `sudo ufw allow 5000/tcp`).
 
-**systemd / service note:** `web_panel.py` writes `templates/` under the process **current working directory** when it is imported. If you run it from a unit file, set `WorkingDirectory=` to the directory you use for `cd` (for example the repo's `src` folder if you start the app from there).
+**systemd / service note:** `web_panel.py` writes its `templates/` folder next to itself (`src/templates`) when it starts, whatever the working directory. A service account therefore needs write access to `src/templates`; see [docs/README-DEPLOY.md](docs/README-DEPLOY.md) for a ready-made unit.
 
 **Install as a user service (survives reboot when user lingering is enabled):** from the repo root, after `pip install -r requirements.txt`:
 
