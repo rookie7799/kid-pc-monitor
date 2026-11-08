@@ -564,6 +564,20 @@ class PCTimeControl:
         with self.state_lock:
             return self.allowed_start, self.allowed_end
 
+    @staticmethod
+    def _window_contains(now, start, end):
+        """Whether a time-of-day falls inside a window whose end is exclusive.
+
+        The end is exclusive so a window "until 22:00" locks at 22:00 instead of
+        letting the PC run through 22:00:59. A window whose start equals its end
+        is rejected when it is set (it would be zero-length).
+        """
+        if start <= end:
+            return start <= now < end
+        # The window crosses midnight (22:00-07:00): it covers the evening after
+        # the start time and the early morning before the end time.
+        return now >= start or now < end
+
     def is_within_allowed_window(self, current_time=None):
         """Whether the PC may be used right now.
 
@@ -577,10 +591,26 @@ class PCTimeControl:
         current_time = current_time or datetime.now()
         if self.is_unlock_active(current_time):
             return True
+        return self._window_contains(
+            dtime(current_time.hour, current_time.minute), start, end
+        )
+
+    def _minutes_until_window_end(self, current_time, start, end):
+        """Minutes until the allowed window closes, or None without a window.
+
+        A moment already outside the window reports 0: the PC locks right away.
+        """
+        if start is None or end is None:
+            return None
         now = dtime(current_time.hour, current_time.minute)
-        if start <= end:
-            return start <= now <= end
-        return now >= start or now <= end
+        if not self._window_contains(now, start, end):
+            return 0.0
+        end_at = current_time.replace(hour=end.hour, minute=end.minute,
+                                      second=0, microsecond=0)
+        if end <= now:
+            # The window crosses midnight, so its end is tomorrow.
+            end_at = end_at + timedelta(days=1)
+        return (end_at - current_time).total_seconds() / 60
 
     def is_unlock_active(self, current_time=None):
         """Whether a parent-granted temporary unlock is still running."""
@@ -596,6 +626,10 @@ class PCTimeControl:
         with self.state_lock:
             if self.unlock_until == until:
                 self.unlock_until = None
+                # The next deadline (window end or budget) needs its own
+                # warnings, so start crossing detection from scratch.
+                self.warnings_sent.clear()
+                self.last_remaining = None
         self.save_state()
         self.logger.info("Temporary unlock expired")
         return False
@@ -611,6 +645,9 @@ class PCTimeControl:
         with self.state_lock:
             self.unlock_until = datetime.now() + timedelta(minutes=minutes)
             until = self.unlock_until
+            # A new deadline re-arms the crossing warnings from a clean slate.
+            self.warnings_sent.clear()
+            self.last_remaining = None
         self.save_state()
         self.logger.info("Temporary unlock granted until %s", until)
         return until
@@ -620,26 +657,43 @@ class PCTimeControl:
         with self.state_lock:
             was_active = self.unlock_until is not None
             self.unlock_until = None
+            if was_active:
+                self.warnings_sent.clear()
+                self.last_remaining = None
         if was_active:
             self.save_state()
             self.logger.info("Temporary unlock cancelled")
         return was_active
 
     def get_time_remaining(self, current_time=None):
-        """Calculate minutes remaining until lock. Returns None if no limit set."""
+        """Minutes until the PC is locked. None when nothing is pending.
+
+        Counts down to the nearest deadline that can end this session: a
+        scheduled lock time, an exhausted daily budget, or the end of the
+        allowed window. Without the window deadline a kid inside a 07:00-22:00
+        window and no daily limit got no 15/5/1-minute warning at all before
+        being locked at 22:00. While a temporary unlock runs, the window and
+        the budget are overridden, so the countdown switches to the end of the
+        bonus time — again the only way to warn before it runs out.
+        """
         if not self.should_monitor_user():
             return None
 
         current_time = current_time or datetime.now()
         self.reset_daily_usage_if_needed(current_time)
-        min_remaining = None
 
         with self.state_lock:
             lock_times = list(self.lock_times)
             usage_limit = self.usage_limit
             usage_minutes = self.accrued_seconds / 60.0
+            allowed_start = self.allowed_start
+            allowed_end = self.allowed_end
+            unlock_until = self.unlock_until
 
-        # Check scheduled lock times
+        candidates = []
+
+        # A scheduled lock time is bedtime, not a budget: it still fires while
+        # a temporary unlock is running.
         for lock_time in lock_times:
             lock_datetime = current_time.replace(hour=lock_time.hour, minute=lock_time.minute, second=0, microsecond=0)
 
@@ -649,24 +703,29 @@ class PCTimeControl:
             if lock_datetime <= current_time:
                 lock_datetime = lock_datetime + timedelta(days=1)
 
-            minutes_until_lock = (lock_datetime - current_time).total_seconds() / 60
+            candidates.append((lock_datetime - current_time).total_seconds() / 60)
 
-            if min_remaining is None or minutes_until_lock < min_remaining:
-                min_remaining = minutes_until_lock
+        unlock_active = unlock_until is not None and current_time < unlock_until
+        if unlock_active:
+            candidates.append((unlock_until - current_time).total_seconds() / 60)
+        else:
+            # Check usage limit. Use `is not None` so a limit of 0 (lock
+            # immediately) is honoured rather than treated as "no limit" by a
+            # falsy check.
+            if usage_limit is not None:
+                candidates.append(usage_limit - usage_minutes)
 
-        # Check usage limit. Use `is not None` so a limit of 0 (lock immediately)
-        # is honoured rather than treated as "no limit" by a falsy check.
-        if usage_limit is not None:
-            minutes_until_limit = usage_limit - usage_minutes
+            window_remaining = self._minutes_until_window_end(
+                current_time, allowed_start, allowed_end
+            )
+            if window_remaining is not None:
+                candidates.append(window_remaining)
 
-            if min_remaining is None or minutes_until_limit < min_remaining:
-                min_remaining = minutes_until_limit
+        if not candidates:
+            return None
 
-        # Never report negative time; once the limit is reached it's simply 0.
-        if min_remaining is not None and min_remaining < 0:
-            min_remaining = 0
-
-        return min_remaining
+        # Never report negative time; once a deadline is reached it's simply 0.
+        return max(min(candidates), 0)
 
     def check_and_send_warnings(self):
         """Check if warnings should be sent and send them.
@@ -685,12 +744,9 @@ class PCTimeControl:
             self.last_remaining = None
             return
 
-        # While a temporary unlock is running nothing is counting down, so a
-        # "0 minutes left" warning would be wrong.
-        if self.is_unlock_active():
-            self.last_remaining = time_remaining
-            return
-
+        # An active temporary unlock no longer switches warnings off:
+        # get_time_remaining() counts down to the end of the bonus time, so the
+        # 15/5/1-minute notices fire before it runs out too.
         previous = self.last_remaining
         self.last_remaining = time_remaining
 
@@ -1066,7 +1122,7 @@ class RemoteControlServer:
                     "GET_STATUS - Check if PC is locked\n"
                     "GET_USAGE_LIMIT - Get current usage limit\n"
                     "GET_LOCK_TIMES - Get scheduled lock times\n"
-                    "GET_TIME_REMAINING - Get time until next lock\n"
+                    "GET_TIME_REMAINING - Minutes until the next lock, window end or bonus end\n"
                     "GET_ALLOWED_WINDOW - Get the allowed window (OFF if unset)\n"
                     "GET_UNLOCK_STATUS - Check the temporary unlock (ACTIVE/INACTIVE)\n"
                     "MESSAGE:<text> - Show popup message\n"

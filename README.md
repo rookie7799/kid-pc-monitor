@@ -15,7 +15,7 @@ DIY parental control system for parents who code. If you know what 'pip install'
 - **⏱️ Daily usage limits** - Set maximum screen time
 - **💬 Send messages** - Display warnings or reminders
 - **🏠 Auto-discovery** - Finds all PCs on your network
-- **⏰ Grace period warnings** - 15, 5, and 1-minute warnings before locks (logging in with less than 15 minutes left shows the exact time remaining)
+- **⏰ Grace period warnings** - 15, 5, and 1-minute warnings before locks, counting down to whichever deadline comes first: the daily limit, a scheduled lock, the end of the allowed window, or the end of the granted bonus time (logging in with less than 15 minutes left shows the exact time remaining)
 - **💾 Persistent settings** - Limits survive PC restarts
 - **👤 User-specific restrictions** - Monitor only specific Windows accounts
 - **📊 Real-time status** - See current limits and time remaining
@@ -260,8 +260,10 @@ This means restrictions **survive PC restarts** - kids can't bypass by rebooting
 ### Allowed Hours Window (opt-in)
 A parent can set the hours a PC may be used, from the panel (`Set Allowed
 Window`) or with `SET_ALLOWED_WINDOW:07:00-21:30`. Outside that window the
-agent locks the PC and re-locks it if it is unlocked again. A window that ends
-before it starts crosses midnight, e.g. `22:00-07:00`.
+agent locks the PC and re-locks it if it is unlocked again. The end time is
+exclusive, so `07:00-21:30` locks the PC at 21:30, and the usual 15/5/1-minute
+warnings count down to it. A window that ends before it starts crosses
+midnight, e.g. `22:00-07:00`.
 
 **The window is off by default.** No window set means the PC is usable at any
 hour and only the daily limit and scheduled lock times apply, which is also how
@@ -270,7 +272,7 @@ an existing installation behaves after upgrading. `CLEAR_ALLOWED_WINDOW` (or
 next to the window.
 
 ### Bonus Time (temporary unlock)
-`UNLOCK:30` (or the `Unlock` button) lets the PC be used for 30 minutes
+`UNLOCK:30` (or the `Grant bonus time` button) lets the PC be used for 30 minutes
 regardless of the window and of an exhausted daily limit - an explicit parent
 decision such as "finish your homework". Bonus time is **not** charged to the
 daily budget, expires on its own, is not restored by a restart, and
