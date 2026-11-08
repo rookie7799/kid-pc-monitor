@@ -16,6 +16,7 @@ import subprocess
 from ctypes import wintypes
 import getpass
 import json
+import shutil
 
 import logging
 from pathlib import Path
@@ -56,8 +57,72 @@ def _format_clock(value):
 
 # ============================================
 
+DATA_DIR_ENV = 'KID_PC_MONITOR_DATA_DIR'
+DATA_DIR_NAME = 'KidPCMonitor'
+
+
+def resolve_data_dir(environ=None):
+    """Return a writable per-user directory for agent state and logs.
+
+    Installed code can live under Program Files, where a standard child account
+    correctly has no write access. Windows exposes LOCALAPPDATA for the account
+    that owns the interactive scheduled task, so mutable files belong there.
+    The explicit override is useful for tests and controlled deployments. On
+    non-Windows systems we preserve the historical current-directory behavior.
+    """
+    environ = os.environ if environ is None else environ
+    override = environ.get(DATA_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
+
+    local_appdata = environ.get('LOCALAPPDATA')
+    if local_appdata:
+        return Path(local_appdata) / DATA_DIR_NAME
+
+    return Path.cwd()
+
+
+STATE_FILE_NAME = 'pc_control_state.json'
+
+
+def migrate_legacy_state_file(target, legacy_dirs=None):
+    """Copy a pre-DATA_DIR state file once, so an upgrade keeps its settings.
+
+    Before the move to %LOCALAPPDATA%, the state lived next to the code, so an
+    upgrade that only changes the path would silently start from an empty state
+    (no usage limit, no lock times, no window). The scheduled task sets its
+    working directory to the script's folder, so both that folder and the
+    current directory are checked. Returns the source path when a file was
+    copied, otherwise None.
+    """
+    target = Path(target)
+    if target.exists():
+        return None
+
+    if legacy_dirs is None:
+        legacy_dirs = [Path(__file__).resolve().parent, Path.cwd()]
+
+    for legacy_dir in legacy_dirs:
+        legacy_file = Path(legacy_dir) / STATE_FILE_NAME
+        try:
+            if not legacy_file.is_file():
+                continue
+            if legacy_file.resolve() == target.resolve():
+                continue
+        except OSError:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy_file, target)
+        return legacy_file
+    return None
+
+
+
+DATA_DIR = resolve_data_dir()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 # Set up logging
-log_file = 'pc_control.log'
+log_file = DATA_DIR / 'pc_control.log'
 if os.path.exists(log_file):
     os.unlink(log_file) #remove previous log
 
@@ -73,7 +138,7 @@ logging.basicConfig(
 # AttributeError, killing the agent before the server can bind port 9999.
 # Redirect them to a file so print() is safe and its output is captured.
 if sys.stdout is None or sys.stderr is None:
-    _console_log = open('pc_control.out.log', 'a', buffering=1, encoding='utf-8')
+    _console_log = open(DATA_DIR / 'pc_control.out.log', 'a', buffering=1, encoding='utf-8')
     if sys.stdout is None:
         sys.stdout = _console_log
     if sys.stderr is None:
@@ -125,8 +190,16 @@ class PCTimeControl:
         self.last_activity = datetime.now()
         self.current_user = self._get_console_user() or getpass.getuser()
         self.last_user_refresh = time.monotonic()
-        self.state_file = 'pc_control_state.json'
+        self.state_file = DATA_DIR / STATE_FILE_NAME
         self.logger = logging.getLogger('PCTimeControl')
+        # Upgrades from the build that kept the state next to the code would
+        # otherwise start with no limit, no lock times and no window.
+        migrated_from = migrate_legacy_state_file(self.state_file)
+        if migrated_from:
+            self.logger.info(
+                "Migrated previous settings from %s to %s", migrated_from, self.state_file
+            )
+            print(f"[{datetime.now():%H:%M:%S}] Migrated settings from {migrated_from}")
         self.warnings_sent = set()  # Threshold minutes already announced this episode
         self.warning_intervals = [15, 5, 1]  # Warning times in minutes before lock
         # Guards the limit/start_time/warnings_sent state that the server thread
@@ -422,13 +495,6 @@ class PCTimeControl:
         self.usage_limit = minutes
 
     def show_message(self, message, title="PC Time Control"):
-        """Show a message to the console user.
-
-        msg.exe is tried first because it reaches the console session from any
-        session, including Session 0. It is NOT part of Windows Home editions,
-        so tkinter is the fallback — and there it is the only option. Without
-        the fallback every warning and parent message silently failed on Home.
-        """
         def _show_via_msg():
             try:
                 user = self.current_user or getpass.getuser()
