@@ -38,11 +38,19 @@ def _cache_set(ip, values):
     with _cache_lock:
         status_cache[ip] = {'values': values, 'ts': time.monotonic()}
 
+# Marks a field whose fetch failed, so it is distinguishable from an answer of
+# None ("no limit", "no window", "no unlock"), which is a real state to show.
+FETCH_FAILED = object()
+
+
 def _refresh_pc_details(ip, port=9999):
     """Fetch all per-PC details in parallel and store them in the cache.
 
-    Returns the cached values dict. Each field is fetched independently and
-    missing/errored fields fall back to the previous cached value (or None).
+    Returns the cached values dict. Each field is fetched independently; a field
+    whose fetch failed keeps its previous cached value, while an answer that
+    happens to be None ("no limit", "window off", "no unlock") replaces it. The
+    old blanket "None keeps the previous value" rule hid a real "no limit"
+    answer forever, e.g. while an exempt parent was signed in.
     """
     results = {}
 
@@ -50,7 +58,7 @@ def _refresh_pc_details(ip, port=9999):
         try:
             results[key] = fn(ip, port)
         except Exception:
-            results[key] = None
+            results[key] = FETCH_FAILED
 
     threads = [
         threading.Thread(target=fetch, args=('status', check_pc_status)),
@@ -70,7 +78,7 @@ def _refresh_pc_details(ip, port=9999):
     prev = status_cache.get(ip, {}).get('values', {}) if ip in status_cache else {}
     merged = dict(prev)
     for k, v in results.items():
-        if v is not None:
+        if v is not FETCH_FAILED:
             merged[k] = v
     _cache_set(ip, merged)
     return merged
@@ -127,7 +135,7 @@ def get_current_user(ip, port=9999):
         return username
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting user from {ip}: {e}")
-        return None
+        raise
 
 def get_usage_limit(ip, port=9999):
     """Get the current usage limit in minutes"""
@@ -141,7 +149,7 @@ def get_usage_limit(ip, port=9999):
         return None if limit == "None" else int(limit)
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting limit from {ip}: {e}")
-        return None
+        raise
 
 def get_lock_times(ip, port=9999):
     """Get scheduled lock times"""
@@ -155,7 +163,7 @@ def get_lock_times(ip, port=9999):
         return None if times == "None" else times.split(',')
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting lock times from {ip}: {e}")
-        return None
+        raise
 
 def get_time_remaining(ip, port=9999):
     """Get time remaining until next lock"""
@@ -172,7 +180,7 @@ def get_time_remaining(ip, port=9999):
         return remaining
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting time remaining from {ip}: {e}")
-        return None
+        raise
 
 def get_allowed_window(ip, port=9999):
     """Get the allowed usage window ('07:00-22:00' or 'OFF')."""
@@ -186,7 +194,7 @@ def get_allowed_window(ip, port=9999):
         return None if window in ("", "OFF", "Unknown") else window
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting allowed window from {ip}: {e}")
-        return None
+        raise
 
 def get_unlock_status(ip, port=9999):
     """Get the temporary-unlock status ('ACTIVE 25 minutes' / 'INACTIVE')."""
@@ -200,7 +208,7 @@ def get_unlock_status(ip, port=9999):
         return status
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Error getting unlock status from {ip}: {e}")
-        return None
+        raise
 
 def scan_for_servers(port=9999):
     """Scan the local network for PCs running the control server"""
